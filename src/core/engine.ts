@@ -19,9 +19,12 @@ import type {
   TurnResult,
 } from './types.js'
 import { createTools, findTool, getToolDefinitions } from '../tools/index.js'
-import { getSystemPrompt } from '../prompts/system.js'
+import { getSystemPrompt, getPlanModePrefix } from '../prompts/system.js'
 import type { Renderer } from '../ui/renderer.js'
 import { maybeCompact, estimateTokens, COMPACT_THRESHOLD_TOKENS } from './compact.js'
+
+/** Tools allowed in plan mode — read-only analysis only */
+const PLAN_MODE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'])
 
 const MAX_TOOL_RESULT_LENGTH = 20_000
 
@@ -67,7 +70,14 @@ export class ExecutionEngine {
     userMessage: string,
     history: OpenAIMessage[],
   ): Promise<{ result: TurnResult; newHistory: OpenAIMessage[] }> {
-    const systemPrompt = this.config.systemPrompt ?? getSystemPrompt(this.config.cwd)
+    const planMode = this.config.planMode ?? false
+
+    // In plan mode, prepend the plan-mode instruction to the system prompt
+    const baseSystemPrompt = this.config.systemPrompt ?? getSystemPrompt(this.config.cwd)
+    const systemPrompt = planMode
+      ? getPlanModePrefix() + baseSystemPrompt
+      : baseSystemPrompt
+
     const toolContext: ToolContext = {
       cwd: this.config.cwd,
       permissionMode: this.config.permissionMode,
@@ -78,7 +88,11 @@ export class ExecutionEngine {
       { role: 'user', content: userMessage },
     ]
 
-    const toolDefs = getToolDefinitions(this.tools)
+    // In plan mode, only expose read-only tools
+    const allToolDefs = getToolDefinitions(this.tools)
+    const toolDefs = planMode
+      ? allToolDefs.filter((t) => PLAN_MODE_TOOLS.has(t.function.name))
+      : allToolDefs
     let iterations = 0
     let finalOutput = ''
 
@@ -217,7 +231,15 @@ export class ExecutionEngine {
         }
 
         this.renderer.toolStart(tc.name, input)
-        const result = await this.executeToolCall(tc.name, input, toolContext)
+
+        // Pre-tool hook
+        this.config.hookRunner?.runPreToolCall(tc.name, input)
+
+        const result = await this.executeToolCall(tc.name, input, toolContext, planMode)
+
+        // Post-tool hook
+        this.config.hookRunner?.runPostToolCall(tc.name, result.content, result.isError)
+
         this.renderer.toolResult(tc.name, result.content, result.isError)
 
         messages.push({
@@ -242,7 +264,16 @@ export class ExecutionEngine {
     toolName: string,
     input: Record<string, unknown>,
     context: ToolContext,
+    planMode = false,
   ): Promise<ToolResult> {
+    // In plan mode, block any tool not in the allowed read-only set
+    if (planMode && !PLAN_MODE_TOOLS.has(toolName)) {
+      return {
+        content: `Tool "${toolName}" is not available in plan mode. Only read-only tools are allowed (Read, Glob, Grep, WebFetch, WebSearch). Produce your plan as text output instead.`,
+        isError: true,
+      }
+    }
+
     const tool = findTool(this.tools, toolName)
     if (!tool) {
       return { content: `Unknown tool: ${toolName}`, isError: true }

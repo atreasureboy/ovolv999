@@ -16,6 +16,14 @@
  *   OVOGO_MODEL        (default: gpt-4o)
  *   OVOGO_MAX_ITER     (default: 30)
  *   OVOGO_CWD          (default: process.cwd())
+ *
+ * Config:
+ *   .ovogo/settings.json  — hooks and other settings (project-level)
+ *   ~/.ovogo/settings.json — user-level defaults
+ *
+ * Skills:
+ *   .ovogo/skills/*.md    — project-specific slash commands
+ *   ~/.ovogo/skills/*.md  — global user slash commands
  */
 
 import { resolve } from 'path'
@@ -27,6 +35,10 @@ import type { EngineConfig, OpenAIMessage } from '../src/core/types.js'
 import { registerAgentFactory } from '../src/tools/agent.js'
 import { loadMcpTools, disconnectAll } from '../src/services/mcp/loader.js'
 import type { ConnectedMcpClient } from '../src/services/mcp/client.js'
+import { loadSettings } from '../src/config/settings.js'
+import { HookRunner, NoopHookRunner } from '../src/config/hooks.js'
+import { loadSkills, expandSkillPrompt } from '../src/skills/loader.js'
+import type { Skill } from '../src/skills/loader.js'
 
 const VERSION = '0.1.0'
 
@@ -71,7 +83,7 @@ function parseArgs(argv: string[]): Args {
 // Help text
 // ─────────────────────────────────────────────────────────────
 
-function printHelp(): void {
+function printHelp(skills: Map<string, Skill>): void {
   const r = new Renderer()
   r.banner(VERSION, 'gpt-4o')
   process.stdout.write(`USAGE
@@ -97,7 +109,27 @@ TOOLS
   Grep       Search file contents with regex
   TodoWrite  Task checklist management
   WebFetch   Fetch URL content as plain text
-  WebSearch  Search the web (set OVOGO_SEARCH_API_KEY or SERPAPI_KEY for better results)
+  WebSearch  Search the web
+  Agent      Spawn a sub-agent (explore/plan/code-reviewer/general-purpose)
+
+REPL COMMANDS
+  /plan <task>   Run task in plan mode (read-only analysis + confirm before execute)
+  /skills        List available skills
+  /<skill> [args] Run a built-in or custom skill
+  /clear         Clear conversation history
+  /history       Show message count
+  /model         Show current model
+  /cwd           Show working directory
+  /help          Show this help
+  /exit          Exit ovogogogo
+
+SKILLS (${skills.size} available)
+${[...skills.values()].map(s => `  /${s.name.padEnd(14)} ${s.description}`).join('\n')}
+
+HOOKS (configure in .ovogo/settings.json)
+  PreToolCall      Runs before each tool call  (env: OVOGO_TOOL_NAME, OVOGO_TOOL_INPUT)
+  PostToolCall     Runs after each tool call   (env: OVOGO_TOOL_NAME, OVOGO_TOOL_RESULT, OVOGO_TOOL_IS_ERROR)
+  UserPromptSubmit Runs when user submits input (env: OVOGO_PROMPT)
 
 EXAMPLES
   ovogogogo
@@ -130,108 +162,62 @@ function updateProgressLog(cwd: string, step: string, nextAction: string): void 
 }
 
 // ─────────────────────────────────────────────────────────────
-// REPL — interactive conversation loop
+// Plan mode handler
 // ─────────────────────────────────────────────────────────────
 
-const BUILTIN_COMMANDS: Record<string, string> = {
-  '/clear': 'Clear conversation history',
-  '/history': 'Show message count in current session',
-  '/model': 'Show current model',
-  '/cwd': 'Show current working directory',
-  '/help': 'Show available commands',
-  '/exit': 'Exit ovogogogo',
-}
-
-async function runRepl(
+async function runPlanMode(
+  task: string,
   engine: ExecutionEngine,
+  planConfig: EngineConfig,
   renderer: Renderer,
+  input: InputHandler,
+  history: OpenAIMessage[],
   cwd: string,
 ): Promise<void> {
-  const input = new InputHandler()
-  const history: OpenAIMessage[] = []
+  renderer.planModeStart()
+  renderer.humanPrompt(`[PLAN] ${task}`)
+  updateProgressLog(cwd, 'planning', task.slice(0, 100))
 
-  renderer.info(`Type your task and press Enter. ${Object.keys(BUILTIN_COMMANDS).join(' | ')}`)
-  renderer.info(`Ctrl+C to cancel a running task · Ctrl+D to exit`)
+  // Run with read-only plan engine (copy of history so it stays pristine)
+  const planEngine = new ExecutionEngine(planConfig, renderer)
+  try {
+    await planEngine.runTurn(task, [...history])
+  } catch (err: unknown) {
+    renderer.error(`Plan error: ${(err as Error).message}`)
+    return
+  }
 
-  let running = false // true while engine is processing
+  // Ask for confirmation
+  renderer.planConfirmPrompt()
+  const { text: answer, eof } = await input.readLine('')
+  if (eof) return
 
-  // Ctrl+C handling — cancel current turn if running
-  let abortController = new AbortController()
-  process.on('SIGINT', () => {
-    if (running) {
-      renderer.stopSpinner()
-      renderer.warn('Cancelled.')
-      abortController.abort()
-      abortController = new AbortController()
-      running = false
-      // Re-draw prompt
-      renderer.writePrompt()
-    } else {
-      renderer.newline()
-      renderer.info('Press Ctrl+D or type /exit to quit.')
-      renderer.writePrompt()
-    }
-  })
+  const confirmed = answer.trim().toLowerCase()
+  if (confirmed === 'y' || confirmed === 'yes') {
+    renderer.info('Executing plan...')
+    renderer.humanPrompt(task)
+    updateProgressLog(cwd, 'running', task.slice(0, 100))
 
-  // Main REPL loop
-  while (true) {
-    renderer.writePrompt()
-    const { text, eof } = await input.readLine('')
-
-    if (eof) {
-      renderer.newline()
-      renderer.info('Goodbye.')
-      input.close()
-      break
-    }
-
-    const trimmed = text.trim()
-    if (!trimmed) continue
-
-    // Built-in commands
-    if (trimmed.startsWith('/')) {
-      const handled = await handleBuiltin(trimmed, history, engine, renderer, cwd)
-      if (handled === 'exit') {
-        input.close()
-        break
-      }
-      if (handled) continue
-    }
-
-    // Display user message
-    renderer.humanPrompt(trimmed)
-    updateProgressLog(cwd, 'running', trimmed.slice(0, 100))
-
-    // Run the engine
-    running = true
     const startMs = Date.now()
-
     try {
-      const { result, newHistory } = await engine.runTurn(trimmed, history)
-
-      // Update rolling history (keep last 40 messages to avoid context explosion)
+      const { result, newHistory } = await engine.runTurn(task, history)
       history.length = 0
-      const keep = newHistory.slice(-40)
-      history.push(...keep)
-
+      history.push(...newHistory.slice(-40))
       const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
       renderer.info(`Done in ${elapsed}s · ${result.reason}`)
     } catch (err: unknown) {
-      const error = err as Error
-      if (error.name === 'AbortError') {
-        // Already handled by SIGINT
-      } else {
-        renderer.error(`Error: ${error.message}`)
-      }
-    } finally {
-      running = false
+      renderer.error(`Execution error: ${(err as Error).message}`)
     }
-
+    updateProgressLog(cwd, 'idle', 'waiting for next task')
+  } else {
+    renderer.info('Plan cancelled.')
     updateProgressLog(cwd, 'idle', 'waiting for next task')
   }
-
-  process.exit(0)
 }
+
+// ─────────────────────────────────────────────────────────────
+// Built-in REPL commands
+// ─────────────────────────────────────────────────────────────
 
 async function handleBuiltin(
   cmd: string,
@@ -239,9 +225,11 @@ async function handleBuiltin(
   engine: ExecutionEngine,
   renderer: Renderer,
   cwd: string,
+  skills: Map<string, Skill>,
 ): Promise<boolean | 'exit'> {
   const parts = cmd.split(/\s+/)
   const command = parts[0]
+  const rest = parts.slice(1).join(' ')
 
   switch (command) {
     case '/exit':
@@ -266,18 +254,193 @@ async function handleBuiltin(
       renderer.info(`Working directory: ${cwd}`)
       return true
 
-    case '/help':
+    case '/skills': {
       renderer.newline()
-      for (const [cmd, desc] of Object.entries(BUILTIN_COMMANDS)) {
-        process.stdout.write(`  \x1b[36m${cmd.padEnd(12)}\x1b[0m ${desc}\n`)
+      if (skills.size === 0) {
+        renderer.info('No skills available.')
+        return true
+      }
+      const bySource = new Map<string, Skill[]>()
+      for (const s of skills.values()) {
+        const list = bySource.get(s.source) ?? []
+        list.push(s)
+        bySource.set(s.source, list)
+      }
+      for (const [source, list] of bySource) {
+        process.stdout.write(`  \x1b[2m── ${source} ──\x1b[0m\n`)
+        for (const s of list) {
+          process.stdout.write(`  \x1b[36m/${s.name.padEnd(16)}\x1b[0m \x1b[2m${s.description}\x1b[0m\n`)
+        }
       }
       renderer.newline()
       return true
+    }
 
-    default:
+    case '/help': {
+      renderer.newline()
+      const COMMANDS = {
+        '/plan <task>': 'Plan mode — analyze then confirm before execute',
+        '/skills':      'List available skills',
+        '/<skill>':     'Run a skill (e.g. /commit, /review)',
+        '/clear':       'Clear conversation history',
+        '/history':     'Show message count in session',
+        '/model':       'Show current model',
+        '/cwd':         'Show working directory',
+        '/help':        'Show this help',
+        '/exit':        'Exit ovogogogo',
+      }
+      for (const [c, desc] of Object.entries(COMMANDS)) {
+        process.stdout.write(`  \x1b[36m${c.padEnd(20)}\x1b[0m ${desc}\n`)
+      }
+      renderer.newline()
+      return true
+    }
+
+    default: {
+      // Check if command matches a loaded skill
+      const skillName = command.slice(1) // strip leading /
+      const skill = skills.get(skillName)
+      if (skill) {
+        return { skill, args: rest } as unknown as boolean // signal to caller
+      }
       renderer.warn(`Unknown command: ${command}. Type /help for available commands.`)
       return true
+    }
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// REPL — interactive conversation loop
+// ─────────────────────────────────────────────────────────────
+
+async function runRepl(
+  engine: ExecutionEngine,
+  planConfig: EngineConfig,
+  renderer: Renderer,
+  cwd: string,
+  skills: Map<string, Skill>,
+  hookRunner: { runUserPromptSubmit: (p: string) => void },
+): Promise<void> {
+  const input = new InputHandler()
+  const history: OpenAIMessage[] = []
+
+  renderer.info(`Type your task and press Enter · /plan /skills /help /exit`)
+  renderer.info(`Ctrl+C to cancel · Ctrl+D to exit`)
+
+  let running = false
+  let abortController = new AbortController()
+
+  process.on('SIGINT', () => {
+    if (running) {
+      renderer.stopSpinner()
+      renderer.warn('Cancelled.')
+      abortController.abort()
+      abortController = new AbortController()
+      running = false
+      renderer.writePrompt()
+    } else {
+      renderer.newline()
+      renderer.info('Press Ctrl+D or type /exit to quit.')
+      renderer.writePrompt()
+    }
+  })
+
+  while (true) {
+    renderer.writePrompt()
+    const { text, eof } = await input.readLine('')
+
+    if (eof) {
+      renderer.newline()
+      renderer.info('Goodbye.')
+      input.close()
+      break
+    }
+
+    const trimmed = text.trim()
+    if (!trimmed) continue
+
+    // ── /plan command — needs full REPL context ──────────────
+    if (trimmed.startsWith('/plan')) {
+      const planTask = trimmed.slice(5).trim()
+      if (!planTask) {
+        renderer.warn('Usage: /plan <task description>')
+        continue
+      }
+      hookRunner.runUserPromptSubmit(trimmed)
+      await runPlanMode(planTask, engine, planConfig, renderer, input, history, cwd)
+      continue
+    }
+
+    // ── Other /commands ──────────────────────────────────────
+    if (trimmed.startsWith('/')) {
+      const result = await handleBuiltin(trimmed, history, engine, renderer, cwd, skills)
+
+      if (result === 'exit') {
+        input.close()
+        break
+      }
+
+      // Skill matched — result is {skill, args}
+      if (result !== true && result !== false && typeof result === 'object') {
+        const { skill, args } = result as unknown as { skill: Skill; args: string }
+        const expandedPrompt = expandSkillPrompt(skill, args)
+        renderer.info(`Running skill: /${skill.name}${args ? ' ' + args : ''}`)
+        hookRunner.runUserPromptSubmit(trimmed)
+        renderer.humanPrompt(expandedPrompt.split('\n')[0] + (expandedPrompt.includes('\n') ? ' …' : ''))
+        updateProgressLog(cwd, 'running', `/${skill.name}`)
+
+        running = true
+        const startMs = Date.now()
+        try {
+          const { result: r, newHistory } = await engine.runTurn(expandedPrompt, history)
+          history.length = 0
+          history.push(...newHistory.slice(-40))
+          const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
+          renderer.info(`Done in ${elapsed}s · ${r.reason}`)
+        } catch (err: unknown) {
+          renderer.error(`Error: ${(err as Error).message}`)
+        } finally {
+          running = false
+        }
+        updateProgressLog(cwd, 'idle', 'waiting for next task')
+        continue
+      }
+
+      continue
+    }
+
+    // ── Regular task ──────────────────────────────────────────
+    renderer.humanPrompt(trimmed)
+
+    // UserPromptSubmit hook
+    hookRunner.runUserPromptSubmit(trimmed)
+
+    updateProgressLog(cwd, 'running', trimmed.slice(0, 100))
+
+    running = true
+    const startMs = Date.now()
+
+    try {
+      const { result, newHistory } = await engine.runTurn(trimmed, history)
+
+      history.length = 0
+      history.push(...newHistory.slice(-40))
+
+      const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
+      renderer.info(`Done in ${elapsed}s · ${result.reason}`)
+    } catch (err: unknown) {
+      const error = err as Error
+      if (error.name !== 'AbortError') {
+        renderer.error(`Error: ${error.message}`)
+      }
+    } finally {
+      running = false
+    }
+
+    updateProgressLog(cwd, 'idle', 'waiting for next task')
+  }
+
+  process.exit(0)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -307,6 +470,10 @@ async function runTask(
 
 async function main(): Promise<void> {
   const { task, model, maxIter, cwd: rawCwd, help, version } = parseArgs(process.argv)
+  const cwd = resolve(rawCwd)
+
+  // Load skills early so --help can list them
+  const skills = loadSkills(cwd)
 
   if (version) {
     process.stdout.write(`${VERSION} (ovogogogo)\n`)
@@ -314,7 +481,7 @@ async function main(): Promise<void> {
   }
 
   if (help) {
-    printHelp()
+    printHelp(skills)
     process.exit(0)
   }
 
@@ -327,11 +494,34 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  const cwd = resolve(rawCwd)
   const renderer = new Renderer()
-
   renderer.banner(VERSION, model)
   renderer.info(`cwd: ${cwd}`)
+
+  // Load settings + hooks
+  const settings = loadSettings(cwd)
+  const hookRunner = settings.hooks
+    ? new HookRunner(settings.hooks)
+    : new NoopHookRunner()
+
+  const hasHooks = Boolean(
+    settings.hooks?.PreToolCall?.length ||
+    settings.hooks?.PostToolCall?.length ||
+    settings.hooks?.UserPromptSubmit?.length,
+  )
+  if (hasHooks) {
+    const count =
+      (settings.hooks?.PreToolCall?.length ?? 0) +
+      (settings.hooks?.PostToolCall?.length ?? 0) +
+      (settings.hooks?.UserPromptSubmit?.length ?? 0)
+    renderer.info(`Hooks: ${count} hook(s) loaded from .ovogo/settings.json`)
+  }
+
+  // Show loaded skills (project/global only, not builtins)
+  const customSkills = [...skills.values()].filter((s) => s.source !== 'builtin')
+  if (customSkills.length > 0) {
+    renderer.info(`Skills: ${customSkills.length} custom skill(s) loaded — type /skills to list`)
+  }
 
   // Load MCP servers (non-fatal if config missing)
   let mcpConnections: ConnectedMcpClient[] = []
@@ -353,6 +543,13 @@ async function main(): Promise<void> {
     cwd,
     permissionMode: 'auto',
     extraTools: mcpTools,
+    hookRunner,
+  }
+
+  // Plan-mode config reuses everything but sets planMode=true
+  const planConfig: EngineConfig = {
+    ...config,
+    planMode: true,
   }
 
   const engine = new ExecutionEngine(config, renderer)
@@ -373,6 +570,7 @@ async function main(): Promise<void> {
   if (!process.stdin.isTTY) {
     const piped = await readStdin()
     if (piped) {
+      hookRunner.runUserPromptSubmit(piped)
       await runTask(engine, renderer, piped, cwd)
       return
     }
@@ -380,12 +578,13 @@ async function main(): Promise<void> {
 
   // Single task from args?
   if (task) {
+    hookRunner.runUserPromptSubmit(task)
     await runTask(engine, renderer, task, cwd)
     return
   }
 
   // Interactive REPL
-  await runRepl(engine, renderer, cwd)
+  await runRepl(engine, planConfig, renderer, cwd, skills, hookRunner)
 }
 
 main().catch((err: unknown) => {

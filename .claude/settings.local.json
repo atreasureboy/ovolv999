@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(pnpm build:*)",
-      "Bash(node /project/ovogogogo/dist/bin/ovogogogo.js --help)"
+      "Bash(node /project/ovogogogo/dist/bin/ovogogogo.js --help)",
+      "Bash(wc:*)",
+      "Bash(node -e ':*)",
+      "Bash(npm run:*)",
+      "Bash(node dist/bin/ovogogogo.js --help)"
     ]
   }
 }

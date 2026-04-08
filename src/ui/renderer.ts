@@ -1,12 +1,12 @@
 /**
  * Terminal UI Renderer — pure process.stdout.write, zero UI frameworks
  *
- * Mimics Claude Code's visual style:
+ * Visual design:
+ * - OVOGO ASCII art banner at startup
+ * - Colored left-border stripes per section type
+ * - Gradient-style separators
  * - ✻ spinner with rotating verbs during thinking
- * - ⎿ tool call display with tool name + args
- * - Colored output via ANSI escape codes
- * - Status line at bottom
- * - Input prompt with ❯ glyph
+ * - Tool call boxes with per-tool color coding
  */
 
 // ─────────────────────────────────────────────────────────────
@@ -39,6 +39,12 @@ const FG = {
   brightWhite: `${ESC}97m`,
 }
 
+// Background colors (subtle tints for stripe accents)
+const BG = {
+  blue: `${ESC}44m`,
+  magenta: `${ESC}45m`,
+}
+
 // Cursor
 const CURSOR = {
   up: (n: number) => `${ESC}${n}A`,
@@ -56,7 +62,19 @@ const w = (s: string) => process.stdout.write(s)
 const isTTY = process.stdout.isTTY
 
 // ─────────────────────────────────────────────────────────────
-// Spinner frames (Claude Code style: ✦ variants)
+// OVOGO ASCII art logo (block font)
+// ─────────────────────────────────────────────────────────────
+
+const LOGO_LINES = [
+  ' ██████╗ ██╗   ██╗ ██████╗  ██████╗  ██████╗ ',
+  '██╔═══██╗██║   ██║██╔═══██╗██╔════╝ ██╔═══██╗',
+  '██║   ██║╚██╗ ██╔╝██║   ██║██║  ███╗██║   ██║',
+  '╚██████╔╝ ╚████╔╝ ╚██████╔╝╚██████╔╝╚██████╔╝',
+  ' ╚═════╝   ╚═══╝   ╚═════╝  ╚═════╝  ╚═════╝ ',
+]
+
+// ─────────────────────────────────────────────────────────────
+// Spinner frames (Braille Unicode)
 // ─────────────────────────────────────────────────────────────
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -137,6 +155,21 @@ export function wrapText(text: string, width: number, indent = ''): string {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Stripe helpers — colored left-border per section type
+// ─────────────────────────────────────────────────────────────
+
+// Heavy vertical bar for emphasis sections
+const STRIPE = {
+  user: `${FG.brightBlue}│${RESET}`,
+  assistant: `${FG.brightCyan}│${RESET}`,
+  tool: `${FG.brightYellow}┃${RESET}`,
+  result: `${FG.brightGreen}│${RESET}`,
+  error: `${FG.brightRed}│${RESET}`,
+  agent: `${FG.brightMagenta}│${RESET}`,
+  compact: `${FG.yellow}│${RESET}`,
+}
+
+// ─────────────────────────────────────────────────────────────
 // Renderer class
 // ─────────────────────────────────────────────────────────────
 
@@ -147,6 +180,7 @@ export class Renderer {
   private spinnerVerbRotateCounter = 0
   private lastSpinnerLineLen = 0
   private termWidth: number
+  private _assistantLineStarted = false
 
   constructor() {
     this.termWidth = isTTY ? (process.stdout.columns ?? 80) : 80
@@ -157,53 +191,85 @@ export class Renderer {
     }
   }
 
-  // ── Banner ───────────────────────────────────────────────
+  // ── Banner ───────────────────────────────────────────────────
 
   banner(version: string, model: string): void {
+    const barWidth = Math.min(this.termWidth - 4, 48)
+    const bar = `${FG.brightBlack}${'━'.repeat(barWidth)}${RESET}`
+
     w('\n')
-    w(`  ${FG.brightMagenta}✻${RESET} ${BOLD}ovogogogo${RESET} ${DIM}v${version}${RESET}\n`)
-    w(`  ${DIM}Model: ${model}${RESET}\n`)
+    for (const line of LOGO_LINES) {
+      w(`  ${FG.brightMagenta}${BOLD}${line}${RESET}\n`)
+    }
+    w('\n')
+    w(`  ${bar}\n`)
+    w(
+      `  ${DIM}version${RESET} ${FG.brightWhite}${version}${RESET}` +
+        `   ${DIM}model${RESET} ${FG.brightCyan}${model}${RESET}\n`,
+    )
+    w(`  ${bar}\n`)
     w('\n')
   }
 
-  // ── Section separator ────────────────────────────────────
+  // ── Section separator — gradient style ───────────────────────
 
   separator(): void {
-    const line = '─'.repeat(Math.min(this.termWidth - 2, 78))
-    w(`\n${DIM}${line}${RESET}\n`)
+    const innerWidth = Math.min(this.termWidth - 10, 68)
+    const mid = `${DIM}${'─'.repeat(innerWidth)}${RESET}`
+    const cap = `${FG.brightBlack}▒${RESET}`
+    w(`\n  ${cap}${mid}${cap}\n`)
   }
 
-  // ── Human message prompt display ─────────────────────────
+  // ── Human message — blue framed box with stripe ──────────────
 
   humanPrompt(text: string): void {
-    this.separator()
-    w(`${FG.brightBlue}❯${RESET} ${text}\n`)
-    this.separator()
+    const innerWidth = Math.min(this.termWidth - 8, 72)
+    const topBar = `${FG.brightBlue}╭${'─'.repeat(innerWidth)}╮${RESET}`
+    const botBar = `${FG.brightBlue}╰${'─'.repeat(innerWidth)}╯${RESET}`
+
+    w('\n')
+    w(`  ${topBar}\n`)
+
+    const lines = text.split('\n')
+    for (const line of lines) {
+      const content = `${FG.brightBlue}❯${RESET} ${BOLD}${FG.brightWhite}${line}${RESET}`
+      w(`  ${FG.brightBlue}│${RESET} ${content}\n`)
+    }
+
+    w(`  ${botBar}\n`)
   }
 
-  // ── Assistant text output (non-streaming) ───────────────
+  // ── Assistant text output (non-streaming) ────────────────────
 
   assistantText(text: string): void {
-    const width = Math.min(this.termWidth - 4, 100)
-    const wrapped = wrapText(text, width, '  ')
-    w(`\n${wrapped}\n`)
+    const width = Math.min(this.termWidth - 8, 96)
+    const lines = wrapText(text, width).split('\n')
+    w('\n')
+    for (const line of lines) {
+      w(`  ${STRIPE.assistant} ${line}\n`)
+    }
   }
 
-  // ── Streaming text output ────────────────────────────────
+  // ── Streaming text output ────────────────────────────────────
 
   private streamingActive = false
 
   beginAssistantText(): void {
     this.streamingActive = true
-    w('\n  ') // indent first line
+    this._assistantLineStarted = false
+    w('\n')
   }
 
   streamToken(token: string): void {
     if (!this.streamingActive) {
       this.beginAssistantText()
     }
-    // Handle newlines: add indent after each newline
-    const indented = token.replace(/\n/g, '\n  ')
+    if (!this._assistantLineStarted) {
+      w(`  ${STRIPE.assistant} `)
+      this._assistantLineStarted = true
+    }
+    // After each newline, re-emit the left stripe prefix
+    const indented = token.replace(/\n/g, `\n  ${STRIPE.assistant} `)
     w(indented)
   }
 
@@ -211,36 +277,44 @@ export class Renderer {
     if (this.streamingActive) {
       w('\n')
       this.streamingActive = false
+      this._assistantLineStarted = false
     }
   }
 
-  // ── Tool call display ────────────────────────────────────
-  // Mimics Claude Code's ⎿ run ... format
+  // ── Tool call display ─────────────────────────────────────────
+  // Yellow stripe for tool invocations, per-tool color for name
 
   toolStart(toolName: string, input: Record<string, unknown>): void {
     const preview = this.formatToolPreview(toolName, input)
-    w(`\n  ${FG.brightBlack}⎿${RESET}  ${BOLD}${this.toolColor(toolName)}${toolName}${RESET}  ${DIM}${preview}${RESET}\n`)
+    const nameColor = this.toolColor(toolName)
+    w(
+      `\n  ${STRIPE.tool}  ${BOLD}${nameColor}${toolName}${RESET}` +
+        `  ${FG.brightBlack}${preview}${RESET}\n`,
+    )
   }
 
   toolResult(toolName: string, result: string, isError: boolean): void {
+    const stripe = isError ? STRIPE.error : STRIPE.result
     const maxPreview = 300
-    const preview = result.length > maxPreview
-      ? result.slice(0, maxPreview) + `\n  ${DIM}... (${result.length - maxPreview} more chars)${RESET}`
-      : result
+    const truncated =
+      result.length > maxPreview
+        ? result.slice(0, maxPreview) + `\n… (${result.length - maxPreview} more chars)`
+        : result
 
     if (isError) {
-      w(`     ${FG.red}✗${RESET} ${FG.red}${preview}${RESET}\n`)
-    } else {
-      // Show first few lines of output
-      const lines = preview.split('\n')
-      const shown = lines.slice(0, 8)
-      const hidden = lines.length - shown.length
-      for (const line of shown) {
-        w(`     ${DIM}${line}${RESET}\n`)
-      }
-      if (hidden > 0) {
-        w(`     ${DIM}... ${hidden} more lines${RESET}\n`)
-      }
+      w(`  ${stripe}  ${FG.brightRed}${truncated}${RESET}\n`)
+      return
+    }
+
+    const lines = truncated.split('\n')
+    const shown = lines.slice(0, 8)
+    const hidden = lines.length - shown.length
+
+    for (const line of shown) {
+      w(`  ${stripe}  ${DIM}${line}${RESET}\n`)
+    }
+    if (hidden > 0) {
+      w(`  ${stripe}  ${DIM}… ${hidden} more line${hidden !== 1 ? 's' : ''}${RESET}\n`)
     }
   }
 
@@ -252,6 +326,10 @@ export class Renderer {
       Edit: FG.brightBlue,
       Glob: FG.brightMagenta,
       Grep: FG.brightMagenta,
+      WebFetch: FG.cyan,
+      WebSearch: FG.cyan,
+      TodoWrite: FG.brightGreen,
+      Agent: FG.brightMagenta,
     }
     return colors[name] ?? FG.white
   }
@@ -260,7 +338,7 @@ export class Renderer {
     switch (toolName) {
       case 'Bash': {
         const cmd = String(input.command ?? '').trim()
-        return cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd
+        return cmd.length > 80 ? cmd.slice(0, 77) + '…' : cmd
       }
       case 'Read': {
         const fp = String(input.file_path ?? '')
@@ -271,12 +349,12 @@ export class Renderer {
         const fp = String(input.file_path ?? '')
         const content = String(input.content ?? '')
         const lines = content.split('\n').length
-        return `${fp} (${lines} lines)`
+        return `${fp}  (${lines} lines)`
       }
       case 'Edit': {
         const fp = String(input.file_path ?? '')
         const old = String(input.old_string ?? '').split('\n')[0]?.slice(0, 40) ?? ''
-        return `${fp}: "${old}…"`
+        return `${fp}  "${old}…"`
       }
       case 'Glob': {
         const pattern = String(input.pattern ?? '')
@@ -293,7 +371,7 @@ export class Renderer {
     }
   }
 
-  // ── Spinner ──────────────────────────────────────────────
+  // ── Spinner ───────────────────────────────────────────────────
 
   startSpinner(initialVerb?: string): void {
     if (!isTTY) return
@@ -302,8 +380,9 @@ export class Renderer {
     this.spinnerVerbIndex = Math.floor(Math.random() * SPINNER_VERBS.length)
     this.spinnerVerbRotateCounter = 0
     if (initialVerb) {
-      // Find verb or use random
-      const idx = SPINNER_VERBS.findIndex(v => v.toLowerCase().startsWith(initialVerb.toLowerCase()))
+      const idx = SPINNER_VERBS.findIndex((v) =>
+        v.toLowerCase().startsWith(initialVerb.toLowerCase()),
+      )
       if (idx !== -1) this.spinnerVerbIndex = idx
     }
 
@@ -313,7 +392,6 @@ export class Renderer {
     this.spinnerInterval = setInterval(() => {
       this.spinnerFrame = (this.spinnerFrame + 1) % SPINNER_FRAMES.length
       this.spinnerVerbRotateCounter++
-      // Rotate verb every ~24 frames (~1.2s at 50ms interval)
       if (this.spinnerVerbRotateCounter >= 24) {
         this.spinnerVerbRotateCounter = 0
         this.spinnerVerbIndex = (this.spinnerVerbIndex + 1) % SPINNER_VERBS.length
@@ -326,10 +404,9 @@ export class Renderer {
     if (!isTTY) return
     const frame = SPINNER_FRAMES[this.spinnerFrame]
     const verb = SPINNER_VERBS[this.spinnerVerbIndex]
-    const elapsed = '' // could add elapsed time
-    const line = `  ${FG.brightMagenta}${frame}${RESET} ${FG.brightBlack}${verb}…${RESET}${elapsed}`
-
-    // Clear previous line and write new spinner
+    const line =
+      `  ${FG.brightMagenta}${frame}${RESET} ` +
+      `${FG.brightBlack}${verb}${RESET}${FG.brightBlack}…${RESET}`
     w(CURSOR.col(1) + CURSOR.clearToEnd + line)
     this.lastSpinnerLineLen = line.replace(/\x1b\[[^m]*m/g, '').length
   }
@@ -344,7 +421,7 @@ export class Renderer {
     this.lastSpinnerLineLen = 0
   }
 
-  // ── Status / info messages ───────────────────────────────
+  // ── Status / info messages ────────────────────────────────────
 
   info(msg: string): void {
     w(`  ${DIM}${msg}${RESET}\n`)
@@ -355,44 +432,64 @@ export class Renderer {
   }
 
   error(msg: string): void {
-    w(`  ${FG.red}✗${RESET} ${FG.red}${msg}${RESET}\n`)
+    w(`  ${FG.brightRed}✗${RESET} ${FG.red}${msg}${RESET}\n`)
   }
 
   warn(msg: string): void {
     w(`  ${FG.yellow}⚠${RESET} ${FG.yellow}${msg}${RESET}\n`)
   }
 
-  // ── Turn stats ───────────────────────────────────────────
+  // ── Sub-agent display ─────────────────────────────────────────
 
-  // ── Sub-agent display ────────────────────────────────────
-
-  agentStart(description: string): void {
-    w(`\n  ${FG.brightMagenta}⎇${RESET}  ${BOLD}Agent${RESET}  ${DIM}${description}${RESET}\n`)
+  agentStart(description: string, agentType = 'general-purpose'): void {
+    const typeLabel = agentType !== 'general-purpose' ? `  ${FG.brightBlack}[${agentType}]${RESET}` : ''
+    w(`\n  ${STRIPE.agent}  ${BOLD}${FG.brightMagenta}⎇ Agent${RESET}${typeLabel}  ${DIM}${description}${RESET}\n`)
   }
 
   agentDone(description: string, success: boolean): void {
-    const icon = success ? `${FG.brightGreen}✓${RESET}` : `${FG.red}✗${RESET}`
-    w(`     ${icon} ${DIM}Agent "${description}" done${RESET}\n`)
+    const icon = success ? `${FG.brightGreen}✓${RESET}` : `${FG.brightRed}✗${RESET}`
+    w(`  ${STRIPE.agent}  ${icon} ${DIM}Agent "${description}" done${RESET}\n`)
   }
 
-  // ── Compact notifications ─────────────────────────────────
+  /** Show plan mode banner before a plan run */
+  planModeStart(): void {
+    w(
+      `\n  ${FG.brightBlue}┌${'─'.repeat(50)}┐${RESET}\n` +
+      `  ${FG.brightBlue}│${RESET}  ${BOLD}${FG.brightCyan}✦ PLAN MODE${RESET}  ${DIM}(read-only analysis)${RESET}` +
+      `${' '.repeat(17)}${FG.brightBlue}│${RESET}\n` +
+      `  ${FG.brightBlue}└${'─'.repeat(50)}┘${RESET}\n`,
+    )
+  }
+
+  /** Ask the user to confirm plan execution, returns the raw line */
+  planConfirmPrompt(): void {
+    w(`\n  ${FG.brightYellow}?${RESET} Proceed with execution? ${DIM}[y/N]${RESET} `)
+  }
+
+  // ── Compact notifications ─────────────────────────────────────
 
   compactStart(tokenCount: number): void {
-    w(`\n  ${FG.yellow}⟳${RESET} ${DIM}Context growing large (~${Math.round(tokenCount / 1000)}k tokens) — compacting conversation…${RESET}\n`)
+    w(
+      `\n  ${STRIPE.compact}  ${FG.yellow}⟳${RESET}` +
+        `  ${DIM}Context ~${Math.round(tokenCount / 1000)}k tokens — compacting…${RESET}\n`,
+    )
   }
 
   compactDone(originalTokens: number, summaryTokens: number): void {
     const saved = Math.round((1 - summaryTokens / originalTokens) * 100)
-    w(`  ${FG.brightGreen}✓${RESET} ${DIM}Compacted: ~${Math.round(originalTokens / 1000)}k → ~${Math.round(summaryTokens / 1000)}k tokens (${saved}% saved)${RESET}\n`)
+    w(
+      `  ${STRIPE.compact}  ${FG.brightGreen}✓${RESET}` +
+        `  ${DIM}~${Math.round(originalTokens / 1000)}k → ~${Math.round(summaryTokens / 1000)}k tokens (${saved}% saved)${RESET}\n`,
+    )
   }
 
-  // ── Turn stats ───────────────────────────────────────────
+  // ── Turn stats ────────────────────────────────────────────────
 
   turnStats(iterations: number, model: string): void {
     w(`\n  ${DIM}↩ ${iterations} turn${iterations !== 1 ? 's' : ''} · ${model}${RESET}\n`)
   }
 
-  // ── Input prompt ─────────────────────────────────────────
+  // ── Input prompt ──────────────────────────────────────────────
 
   writePrompt(): void {
     w(`\n${FG.brightBlue}❯${RESET} `)

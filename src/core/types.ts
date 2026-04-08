@@ -78,6 +78,16 @@ export interface ToolContext {
   permissionMode: 'auto' | 'ask' | 'deny'
 }
 
+/**
+ * Interface for hook runners — decouples engine from config layer.
+ * Hooks are best-effort: implementations must never throw.
+ */
+export interface IHookRunner {
+  runPreToolCall(toolName: string, input: Record<string, unknown>): void
+  runPostToolCall(toolName: string, result: string, isError: boolean): void
+  runUserPromptSubmit(prompt: string): void
+}
+
 export interface EngineConfig {
   model: string
   baseURL?: string
@@ -88,6 +98,13 @@ export interface EngineConfig {
   systemPrompt?: string
   /** Extra tools to inject (e.g. MCP tools) */
   extraTools?: Tool[]
+  /**
+   * Plan mode: restrict tools to read-only (Read, Glob, Grep, WebFetch, WebSearch).
+   * The agent analyzes and plans but cannot write, edit, or execute.
+   */
+  planMode?: boolean
+  /** Hook runner for PreToolCall / PostToolCall / UserPromptSubmit events */
+  hookRunner?: IHookRunner
 }
 
 export interface TurnResult {

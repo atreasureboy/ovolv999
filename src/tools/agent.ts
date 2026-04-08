@@ -1,25 +1,34 @@
 /**
- * AgentTool — spawn a sub-agent to handle a focused subtask
+ * AgentTool — spawn a specialized sub-agent to handle a focused subtask
  *
  * Distilled from Claude Code source:
  * - src/tools/AgentTool/runAgent.ts   (sub-engine execution)
  * - src/tools/AgentTool/prompt.ts     (description and when-to-use)
  *
- * Design:
- * - Parent engine calls AgentTool with {description, prompt}
- * - AgentTool creates a fresh child ExecutionEngine
- * - Child has independent conversation history (clean context)
- * - Child shares the same renderer (with visual nesting via indent)
- * - Child's result is returned as a string to the parent
+ * Sub-agent types:
+ * ┌─────────────────┬───────────────────────────────────────────────────────┐
+ * │ general-purpose │ All tools, standard system prompt                     │
+ * │ explore         │ Read-only tools (Read/Glob/Grep/WebFetch/WebSearch)    │
+ * │ plan            │ Read-only + plan-mode prompt (outputs step-by-step plan)│
+ * │ code-reviewer   │ Read-only + focused code review prompt                │
+ * └─────────────────┴───────────────────────────────────────────────────────┘
  *
- * Why sub-agents?
- * - Complex tasks: parent decomposes, sub-agents execute pieces in sequence
- * - Clean context: each sub-agent gets a focused prompt, no noise from parent history
+ * Design:
+ * - Parent engine calls AgentTool with {description, prompt, subagent_type}
+ * - AgentTool creates a fresh child ExecutionEngine with type-appropriate config
+ * - Child has independent conversation history (clean context)
+ * - Child shares the same renderer (visual nesting via magenta stripe)
+ * - Child result is returned as a string to the parent
  * - Recursion guard: sub-agents cannot spawn further sub-agents (depth=1 limit)
  */
 
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import type { EngineConfig } from '../core/types.js'
+import { getAgentTypeSystemPrompt } from '../prompts/system.js'
+
+export type AgentType = 'general-purpose' | 'explore' | 'plan' | 'code-reviewer'
+
+const READ_ONLY_TYPES = new Set<AgentType>(['explore', 'plan', 'code-reviewer'])
 
 // Injected at startup — avoids circular imports
 let _engineFactory: ((config: EngineConfig, renderer: unknown) => { runTurn: (msg: string, history: never[]) => Promise<{ result: { output: string; reason: string } }> }) | null = null
@@ -43,35 +52,42 @@ export class AgentTool implements Tool {
     type: 'function',
     function: {
       name: 'Agent',
-      description: `Launch a focused sub-agent to handle a specific subtask.
+      description: `Launch a specialized sub-agent to handle a focused subtask.
 
-Use this when:
-- A task has a self-contained subtask that would clutter the main conversation
-- You need to explore/investigate something without polluting the main context
+Sub-agent types:
+- "general-purpose" (default): All tools available. Use for complex subtasks that need to read and write.
+- "explore": Read-only (Read, Glob, Grep, WebFetch, WebSearch). Fast codebase investigation without side effects.
+- "plan": Read-only + produces a numbered step-by-step plan. Use before making complex changes.
+- "code-reviewer": Read-only + code quality focus. Reports issues by severity without making changes.
+
+Use sub-agents when:
+- A subtask is self-contained and would clutter the main conversation
+- You need to investigate something without polluting the main context
 - A subtask requires many tool calls but produces a single final answer
 
 The sub-agent gets a fresh conversation context with only the prompt you provide.
-It has access to all the same tools (Bash, Read, Write, Edit, Glob, Grep, etc.)
-but CANNOT spawn further sub-agents.
+It runs to completion and returns its output as a string.
 
-The sub-agent runs to completion and returns its final output as a string.
-
-IMPORTANT: Only use this for genuinely self-contained subtasks. Don't use it
-just to parallelize work — use multiple tool calls in a single response for that.`,
+IMPORTANT: Sub-agents cannot spawn further sub-agents.`,
       parameters: {
         type: 'object',
         properties: {
           description: {
             type: 'string',
-            description: 'Brief label for this sub-task (shown in UI, e.g. "Fix auth module")',
+            description: 'Brief label for this sub-task (shown in UI, e.g. "Explore auth module")',
           },
           prompt: {
             type: 'string',
-            description: `The complete task prompt for the sub-agent. Must be fully self-contained — the sub-agent has NO access to the parent conversation history. Include all context needed: file paths, current state, what to do, what to return.`,
+            description: `Complete task prompt for the sub-agent. Must be fully self-contained — the sub-agent has NO access to the parent conversation. Include all context: file paths, current state, what to do, what to return.`,
+          },
+          subagent_type: {
+            type: 'string',
+            enum: ['general-purpose', 'explore', 'plan', 'code-reviewer'],
+            description: 'Type of sub-agent (default: "general-purpose"). Use "explore" for read-only investigation, "plan" for planning, "code-reviewer" for code review.',
           },
           max_iterations: {
             type: 'number',
-            description: 'Max think-act cycles for the sub-agent (default: 15)',
+            description: 'Max think-act cycles for the sub-agent (default: 15, max: 30)',
           },
         },
         required: ['description', 'prompt'],
@@ -82,12 +98,21 @@ just to parallelize work — use multiple tool calls in a single response for th
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const description = String(input.description ?? 'subtask')
     const prompt = String(input.prompt ?? '')
+    const agentType = (String(input.subagent_type ?? 'general-purpose')) as AgentType
     const maxIterations = typeof input.max_iterations === 'number'
       ? Math.min(input.max_iterations, 30)
       : 15
 
     if (!prompt.trim()) {
       return { content: 'Error: prompt is required and must not be empty', isError: true }
+    }
+
+    const validTypes: AgentType[] = ['general-purpose', 'explore', 'plan', 'code-reviewer']
+    if (!validTypes.includes(agentType)) {
+      return {
+        content: `Error: unknown subagent_type "${agentType}". Use one of: ${validTypes.join(', ')}`,
+        isError: true,
+      }
     }
 
     if (!_engineFactory || !_currentConfig || !_currentRenderer) {
@@ -97,20 +122,23 @@ just to parallelize work — use multiple tool calls in a single response for th
       }
     }
 
-    // Visual: show sub-agent header
     const renderer = _currentRenderer as {
-      agentStart: (desc: string) => void
+      agentStart: (desc: string, type: string) => void
       agentDone: (desc: string, success: boolean) => void
     }
-    renderer.agentStart(description)
+    renderer.agentStart(description, agentType)
 
-    // Create child engine with reduced max iterations + same config
+    // Build child config based on agent type
     const childConfig: EngineConfig = {
       ..._currentConfig,
       maxIterations,
       cwd: context.cwd,
-      // Mark as sub-agent so it won't spawn further agents
-      systemPrompt: buildSubAgentSystemPrompt(context.cwd),
+      // No hooks in sub-agents (avoid recursive hook execution)
+      hookRunner: undefined,
+      // Read-only types get planMode=true (engine filters write tools)
+      planMode: READ_ONLY_TYPES.has(agentType),
+      // Type-specific system prompt
+      systemPrompt: getAgentTypeSystemPrompt(agentType, context.cwd),
     }
 
     const childEngine = _engineFactory(childConfig, _currentRenderer)
@@ -121,13 +149,13 @@ just to parallelize work — use multiple tool calls in a single response for th
 
       if (!result.output) {
         return {
-          content: `Sub-agent "${description}" completed (${result.reason}) but produced no text output.`,
+          content: `Sub-agent "${description}" (${agentType}) completed (${result.reason}) but produced no text output.`,
           isError: false,
         }
       }
 
       return {
-        content: `Sub-agent "${description}" result:\n\n${result.output}`,
+        content: `Sub-agent "${description}" (${agentType}) result:\n\n${result.output}`,
         isError: false,
       }
     } catch (err: unknown) {
@@ -138,18 +166,4 @@ just to parallelize work — use multiple tool calls in a single response for th
       }
     }
   }
-}
-
-function buildSubAgentSystemPrompt(cwd: string): string {
-  return `You are a focused sub-agent with a specific subtask to complete.
-
-Working directory: ${cwd}
-
-Rules:
-- Complete ONLY the task in the user message — do not expand scope
-- You cannot spawn further sub-agents (Agent tool is disabled for you)
-- After completing the task, provide a clear, complete summary of what you did and the result
-- If you cannot complete the task, explain exactly why and what you tried
-
-You have access to: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSearch.`
 }
