@@ -70,26 +70,37 @@ const PLAN_MODE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'
  * These can run in parallel within a single LLM response.
  * WeaponRadar is a read-only DB query — safe to run in parallel with other reads.
  * FindingList is read-only — safe to run in parallel.
+ * MultiScan manages its own internal parallelism and is safe to run alongside reads.
  */
 const CONCURRENCY_SAFE_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch',
-  'WeaponRadar', 'FindingList',
+  'WeaponRadar', 'FindingList', 'MultiScan',
 ])
+
+/**
+ * Returns true if a Bash call uses run_in_background=true.
+ * Background Bash calls return instantly (just spawn a process),
+ * so batching them together is safe and makes startup concurrent.
+ */
+function isBashBackground(call: ParsedToolCall): boolean {
+  return call.tc.name === 'Bash' && call.input.run_in_background === true
+}
 
 /**
  * Partition tool calls into batches for scheduling:
  * - Consecutive safe (read-only) tools → one batch, run with Promise.all
- * - Any unsafe (write/exec) tool → its own serial batch
+ * - Consecutive background Bash calls → one parallel batch (all spawn instantly)
+ * - Any other unsafe (write/exec) tool → its own serial batch
  */
 function partitionToolCalls(calls: ParsedToolCall[]): ToolBatch[] {
   const batches: ToolBatch[] = []
 
   for (const call of calls) {
-    const safe = CONCURRENCY_SAFE_TOOLS.has(call.tc.name)
+    const safe = CONCURRENCY_SAFE_TOOLS.has(call.tc.name) || isBashBackground(call)
     const last = batches[batches.length - 1]
 
     if (last && last.safe && safe) {
-      last.calls.push(call)   // extend existing safe batch
+      last.calls.push(call)   // extend existing safe/background batch
     } else {
       batches.push({ safe, calls: [call] })  // new batch
     }

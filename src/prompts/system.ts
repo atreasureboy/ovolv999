@@ -63,20 +63,38 @@ ${engagementSection}
 - 新建文件 → Write，不用 \`echo >\`
 
 ## 渗透专用工具
-- **WeaponRadar** — 检索公司内部 22W Nuclei PoC 武器数据库（BGE-M3 语义搜索）
-  - 发现目标服务版本后立即调用，获取现成 PoC
-  - 触发时机：识别到具体软件/版本、CVE、漏洞类型
-  - 示例查询："Apache Struts2 RCE"、"Shiro 反序列化"、"目标跑着 Jenkins 2.3"
-  - ⚠️ 首次调用约 30-60s（模型加载），属正常现象
-- **FindingWrite** — 发现漏洞、弱口令、配置缺陷时立即记录
-- **FindingList** — 回顾已记录的 findings，规划下一步
-- **Bash** — 执行 nmap/nuclei/sqlmap/hydra 等渗透工具
-- **WebFetch** — 读取目标 Web 响应、API 接口、文档
-- **WebSearch** — 查找 CVE 详情、漏洞利用 PoC、工具用法
-- **TodoWrite** — 3步以上的复杂任务拆分追踪
 
-## 并行执行
-多个独立操作（如同时跑多个端口扫描）时并行调用工具，提高效率。
+### ⚡ MultiScan — 并行扫描（核心规则）
+多个扫描工具必须用 MultiScan 同时启动，严禁逐个串行执行 Bash。
+
+【禁止】Bash(nmap)→等待→Bash(subfinder)→等待→Bash(nuclei)  ← 串行，极慢
+【必须】MultiScan([...], detach: ?)  ← 所有工具同时启动
+
+**关键：根据任务时长选 detach 模式**
+
+detach: false（等待完成，适合 <5 分钟）：
+  subfinder / httpx / dnsx / naabu / nmap --top-ports 1000
+
+detach: true（立即返回，适合 >5 分钟）：
+  nmap -p-（全端口）/ nuclei 全模板 / hydra / sqlmap
+  → 返回 PID 和输出文件，之后用 tail -20 output_file 查进度
+
+**nmap 必须分两步（绝不能一步 -sV -sC -p-）：**
+  第一步 detach:true → nmap -Pn -T4 --min-rate 5000 -p- TARGET -oN ports.txt
+  第二步 等第一步出结果 → 提取开放端口 → nmap -sV -sC -p OPEN_PORTS TARGET
+
+### 🔍 WeaponRadar — 公司武器库（22W PoC）
+检索内部 Nuclei PoC 数据库，BGE-M3 语义搜索
+- 发现目标服务版本后立即调用（和其他工具并行触发）
+- 示例："Apache Struts2 RCE"、"Shiro 反序列化"、"Jenkins 2.3 CVE"
+- ⚠️ 首次调用约 30-60s（模型加载）
+
+### 📌 其他工具
+- **FindingWrite** — 发现漏洞时立即记录（含 PoC/MITRE TTP）
+- **FindingList** — 回顾已记录的 findings
+- **Bash** — 单个命令执行（读取结果文件、一次性操作用）
+- **WebFetch / WebSearch** — 获取 CVE 详情、PoC、文档
+- **TodoWrite** — 3步以上任务拆分
 
 # 漏洞记录规范
 发现以下情况时，立即调用 FindingWrite：
@@ -93,6 +111,22 @@ ${engagementSection}
 1. 开始前创建完整任务列表（全部 pending）
 2. 开始某步前设为 in_progress
 3. 完成后标记 completed 再进行下一步
+
+# 工具路径验证规则（重要）
+使用任何安全工具前，必须确认工具路径正确，因为：
+- 系统中可能有同名但功能完全不同的工具（如 Python httpx vs ProjectDiscovery httpx）
+- Go 工具通常在 /root/go/bin/ 或 /root/.pdtm/go/bin/，不在系统 PATH 默认位置
+
+Go 安全工具必须用绝对路径：
+- httpx    → /root/go/bin/httpx
+- subfinder → /root/go/bin/subfinder
+- nuclei   → /root/go/bin/nuclei
+- dnsx     → /root/go/bin/dnsx
+- naabu    → /root/go/bin/naabu
+- katana   → /root/go/bin/katana
+- ffuf     → /root/go/bin/ffuf
+
+不确定时先验证：/root/go/bin/httpx -version 2>&1 | head -2
 
 # 扫描并发策略（重要）
 渗透工具运行时间差异极大，必须选择正确的执行模式：

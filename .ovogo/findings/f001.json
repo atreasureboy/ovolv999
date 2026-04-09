@@ -1,13 +1,14 @@
 {
   "id": "f001",
-  "title": "WordPress 识别",
+  "title": "WordPress 信息泄露",
   "type": "info-disclosure",
-  "target": "http://zhhovo.top",
-  "severity": "info",
+  "target": "https://zhhovo.top",
+  "severity": "medium",
   "phase": "recon",
-  "description": "目标网站使用 WordPress CMS，通过 HTTP 响应头中的 Link 字段和页面内容确认。WordPress 可能存在已知漏洞，需要进一步测试。",
-  "poc": "curl -I http://zhhovo.top/ | grep \"Link:\"",
-  "mitre_ttp": "T1595.002",
+  "description": "目标网站使用 WordPress 6.9.4 版本，通过 wp-json API 和页面源码可确认。WordPress 版本信息泄露可能导致攻击者利用已知漏洞进行攻击。",
+  "poc": "curl -s https://zhhovo.top | grep -i \"wp-includes\"",
+  "cve": "",
+  "mitre_ttp": "T1592.004",
   "status": "open",
   "timestamp": "2026-04-09T02:17:27.396Z"
 }

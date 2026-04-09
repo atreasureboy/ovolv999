@@ -1,179 +1,127 @@
 ---
 name: httpx
-description: httpx — HTTP 探测与指纹识别工具
+description: httpx (ProjectDiscovery) — HTTP 批量探测与指纹识别
 ---
 
-你是 httpx 专家，拥有下方完整参考手册。根据用户的具体任务，给出精确的命令、参数解释和执行建议。
+你是 httpx 专家。注意：系统中可能存在两个同名工具，使用前必须先检测。
 
 用户任务：$ARGS
 
 ---
 
-# httpx — HTTP 探测与指纹识别工具
+# httpx — HTTP 探测与指纹识别
 
-## 基本信息
+## ⚠️ 首先：检测正确的 httpx 路径
 
-| 项目 | 内容 |
-|------|------|
-| 二进制路径 | `/root/go/bin/httpx` 或 `/usr/local/bin/httpx` |
-| 项目来源 | ProjectDiscovery |
-| 适用场景 | HTTP 存活探测、技术栈指纹、标题/状态码收集、Web 资产普查 |
+系统中 `httpx` 可能是 Python HTTP 客户端（不是渗透工具），**必须先确认路径**：
+
+```bash
+# 检测 ProjectDiscovery httpx 的正确路径
+PD_HTTPX=""
+for p in /root/go/bin/httpx /root/.pdtm/go/bin/httpx /usr/local/bin/httpx-pd /home/$(whoami)/go/bin/httpx; do
+    if [ -x "$p" ] && $p -version 2>&1 | grep -qi "projectdiscovery\|httpx v"; then
+        PD_HTTPX="$p"
+        break
+    fi
+done
+
+# 检查 PATH 中的 httpx 是否是 PD 版本
+if [ -z "$PD_HTTPX" ] && httpx -version 2>&1 | grep -qi "projectdiscovery\|httpx v"; then
+    PD_HTTPX="httpx"
+fi
+
+echo "ProjectDiscovery httpx: ${PD_HTTPX:-未找到}"
+```
+
+**之后所有命令用 `$PD_HTTPX` 代替 `httpx`**
 
 ---
 
-## 核心参数速查
+## 核心参数（ProjectDiscovery httpx）
 
 | 参数 | 说明 |
 |------|------|
-| `-u <url>` | 扫描单个 URL |
 | `-l <file>` | 从文件读取目标列表 |
-| `-sc` / `-status-code` | 显示响应状态码 |
+| `-sc` | 显示状态码 |
 | `-title` | 显示页面标题 |
-| `-td` / `-tech-detect` | 显示技术栈信息 |
-| `-server` / `-web-server` | 显示服务器信息 |
-| `-cl` / `-content-length` | 显示响应内容长度 |
-| `-ct` / `-content-type` | 显示 Content-Type |
-| `-ip` | 显示解析到的 IP |
-| `-cdn` | 显示 CDN 信息 |
-| `-cname` | 显示 CNAME 记录 |
-| `-location` | 显示重定向位置 |
-| `-favicon` | 显示 favicon hash（用于 Shodan 关联） |
-| `-hash <algo>` | 显示响应内容哈希 |
-| `-p <ports>` | 指定探测端口 |
-| `-ports 80,443,8080` | 多端口探测 |
-| `-fr` / `-follow-redirects` | 跟随重定向 |
-| `-silent` | 静默模式，只输出存活 URL |
-| `-t <num>` | 并发线程数（默认 50） |
-| `-timeout <sec>` | 超时秒数 |
-| `-H <header>` | 自定义请求头 |
-| `-o <file>` | 输出到文件 |
-| `-json` | JSON 格式输出 |
-| `-mc <codes>` | 匹配指定状态码 |
-| `-fc <codes>` | 过滤指定状态码 |
-| `-ml <size>` | 匹配响应长度 |
-| `-ms <string>` | 匹配响应内容字符串 |
-| `-probe` | 显示协议（http/https） |
+| `-td` | 技术栈指纹 |
+| `-server` | 显示服务器信息 |
+| `-ip` | 显示解析 IP |
+| `-cdn` | CDN 检测 |
+| `-silent` | 只输出结果 |
+| `-t <n>` | 并发线程（默认50） |
+| `-o <file>` | 输出文件 |
+| `-json` | JSON 格式 |
+| `-mc <codes>` | 匹配状态码 |
+| `-fc <codes>` | 过滤状态码 |
+| `-follow-redirects` | 跟随重定向 |
+| `-H <header>` | 自定义 Header |
 
 ---
 
-## 典型使用场景
+## 正确用法（必须用检测到的路径）
 
-### 1. 基础探测（存活 + 状态码 + 标题 + 技术栈）
 ```bash
-# 输出需要重定向 stderr 到 stdout
-echo "https://target.com" | httpx -sc -title -td -server 2>&1
+# 先设置变量
+PD_HTTPX=/root/go/bin/httpx   # 或检测到的路径
 
-# 或使用管道方式
-echo "target.com" | httpx -sc -title -td -server -silent
-```
+# 单目标探测
+echo "https://TARGET" | $PD_HTTPX -sc -title -td -server -silent
 
-### 2. 多目标批量探测
-```bash
-cat hosts.txt | httpx -sc -title -td -server -silent -o live_hosts.txt
-```
+# 多目标批量（从文件）
+$PD_HTTPX -l /SESSION/subs.txt -sc -title -td -server -ip -cdn -silent \
+    -o /SESSION/httpx_results.txt
 
-### 3. 子域名存活检测 + 技术栈
-```bash
-subfinder -d target.com -silent | \
-  httpx -sc -title -td -server -ip -cdn -silent | \
-  tee web_assets.txt
-```
+# 管道方式（与 subfinder 配合）
+subfinder -d TARGET -silent | $PD_HTTPX -sc -title -td -server -ip -silent \
+    -o /SESSION/web_assets.txt
 
-### 4. 多端口探测
-```bash
-cat ips.txt | httpx -p 80,443,8080,8443,8888,9090,3000,5000 -sc -title -silent
-```
+# 只获取存活 URL
+$PD_HTTPX -l /SESSION/subs.txt -silent > /SESSION/live_urls.txt
 
-### 5. 仅获取存活 URL（用于后续工具输入）
-```bash
-cat subs.txt | httpx -silent > live_urls.txt
-```
+# 多端口探测
+$PD_HTTPX -l /SESSION/ips.txt -p 80,443,8080,8443,8888,9090,3000,5000 \
+    -sc -title -silent -o /SESSION/multi_port.txt
 
-### 6. 过滤状态码（排除 404/403）
-```bash
-cat urls.txt | httpx -fc 404,403 -sc -title -silent
-```
-
-### 7. 只看成功响应（200）
-```bash
-cat urls.txt | httpx -mc 200 -sc -title -silent
-```
-
-### 8. 获取 IP 地址（资产普查）
-```bash
-cat subs.txt | httpx -ip -silent | awk '{print $2}' | sort -u
-```
-
-### 9. Favicon Hash（关联 Shodan 资产）
-```bash
-echo "https://target.com" | httpx -favicon -silent
-# 然后在 Shodan 搜索: http.favicon.hash:<hash>
-```
-
-### 10. 带自定义头请求（绕过访问控制）
-```bash
-cat urls.txt | httpx -H "X-Forwarded-For: 127.0.0.1" \
-                     -H "X-Real-IP: 127.0.0.1" \
-                     -sc -title -silent
-```
-
-### 11. JSON 格式输出
-```bash
-cat urls.txt | httpx -json -silent | jq -r '[.url, .status_code, .title] | @tsv'
-```
-
-### 12. 完整侦察流水线
-```bash
-subfinder -d target.com -silent | \
-  dnsx -resp-only -a -silent | \
-  httpx -sc -title -td -server -ip -cdn -silent | \
-  tee full_recon.txt
+# JSON 输出（详细信息）
+echo "https://TARGET" | $PD_HTTPX -json -silent | jq -r '[.url,.status_code,.title,.tech] | @tsv'
 ```
 
 ---
 
-## 输出格式说明
+## 如果 ProjectDiscovery httpx 未安装
 
-```
-https://target.com [200] [Apache/2.4.41] [WordPress,jQuery] [Title Here]
-│                   │     │               │                   │
-URL               状态码  服务器信息      技术栈              页面标题
+```bash
+# 用 curl 替代单目标探测
+curl -sI https://TARGET | head -20
+
+# 用 curl 批量（较慢，无技术栈识别）
+while read url; do
+    code=$(curl -so /dev/null -w "%{http_code}" --max-time 5 "$url")
+    title=$(curl -s --max-time 5 "$url" | grep -oP '(?<=<title>)[^<]+' | head -1)
+    server=$(curl -sI --max-time 5 "$url" | grep -i "^server:" | cut -d' ' -f2-)
+    echo "$code | $url | $title | $server"
+done < /SESSION/subs.txt | tee /SESSION/curl_probe.txt
+
+# 安装 ProjectDiscovery httpx
+go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+# 或
+curl -sL https://github.com/projectdiscovery/httpx/releases/latest/download/httpx_linux_amd64.zip -o /tmp/httpx.zip
+unzip /tmp/httpx.zip -d /usr/local/bin/
 ```
 
 ---
 
-## 常见问题
-
-**问：为什么看不到输出？**
-答：httpx 默认把进度信息输出到 stderr，需要加 `2>&1` 或使用 `-silent` 参数
+## 与其他工具配合
 
 ```bash
-# 方式一：重定向 stderr
-echo "https://target.com" | httpx -sc -title -td 2>&1
+# 完整侦察流水线
+PD_HTTPX=/root/go/bin/httpx
+subfinder -d TARGET -silent | \
+    /root/go/bin/dnsx -a -resp-only -silent | \
+    $PD_HTTPX -sc -title -td -server -ip -cdn -silent | \
+    tee /SESSION/full_web_assets.txt
 
-# 方式二：静默模式（只输出结果）
-echo "https://target.com" | httpx -sc -title -td -silent
+# 过滤有趣目标
+cat /SESSION/web_assets.txt | grep -i "admin\|login\|manage\|api\|dev\|test\|stage"
 ```
-
-**问：如何只看有某个关键词的目标？**
-```bash
-cat urls.txt | httpx -title -silent | grep -i "admin\|login\|dashboard"
-```
-
-**问：如何探测内网资产？**
-```bash
-# 扫描内网 C 段
-for i in $(seq 1 254); do echo "192.168.1.$i"; done | \
-  httpx -p 80,443,8080,8443 -sc -title -silent
-```
-
----
-
-## 技术栈识别范围
-
-httpx 可识别的技术包括：
-- **服务器**：Apache、Nginx、IIS、Tomcat、Jetty 等
-- **框架**：WordPress、Drupal、Joomla、Laravel、Django、Spring 等
-- **语言**：PHP、Java、Python、ASP.NET 等
-- **CDN**：Cloudflare、Akamai、Fastly 等
-- **前端**：jQuery、Vue.js、React、Bootstrap 等

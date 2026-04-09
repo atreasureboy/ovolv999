@@ -18,16 +18,28 @@ description: 完整渗透测试侦察流程
 ## 环境变量初始化
 
 ```bash
-# 设置工具 PATH
+# 设置工具路径（必须用绝对路径，避免同名冲突）
 export PATH=$PATH:/root/go/bin:/root/.pdtm/go/bin:/root/.local/bin
+
+# Go 工具绝对路径（防止 Python 同名工具覆盖）
+HTTPX=/root/go/bin/httpx
+SUBFINDER=/root/go/bin/subfinder
+DNSX=/root/go/bin/dnsx
+NUCLEI=/root/go/bin/nuclei
+NAABU=/root/go/bin/naabu
+KATANA=/root/go/bin/katana
+FFUF=/root/go/bin/ffuf
+
+# 验证关键工具（任何路径找不到时有备选方案）
+for tool in $HTTPX $SUBFINDER $NUCLEI; do
+    [ -x "$tool" ] || echo "[!] 未找到: $tool"
+done
 
 # 设置目标（替换为实际目标）
 TARGET="target.com"
 TARGET_IP="1.2.3.4"
 
-# OUTPUT_DIR 使用 session 目录（已由 ovogogogo 在 prompt 中注入，直接引用）
-# 如果手动运行，可以设置：
-# OUTPUT_DIR="/path/to/sessions/target_YYYYMMDD_HHMMSS"
+# OUTPUT_DIR 使用 session 目录（已由 ovogogogo 在 prompt 中注入）
 OUTPUT_DIR="${SESSION_DIR:-./sessions/manual_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p $OUTPUT_DIR
 ```
@@ -60,17 +72,17 @@ sort -u $OUTPUT_DIR/wayback_urls.txt > $OUTPUT_DIR/all_history_urls.txt
 ```bash
 # 4. DNS 解析过滤存活子域名
 cat $OUTPUT_DIR/subs.txt | \
-    dnsx -a -resp-only -silent | \
+    $DNSX -a -resp-only -silent | \
     sort -u | \
     tee $OUTPUT_DIR/live_ips.txt
 
 # 5. HTTP 存活探测 + 指纹识别
 cat $OUTPUT_DIR/subs.txt | \
-    httpx -sc -title -td -server -ip -cdn -silent | \
+    $HTTPX -sc -title -td -server -ip -cdn -silent | \
     tee $OUTPUT_DIR/web_assets.txt
 
 # 只保留存活 URL
-cat $OUTPUT_DIR/subs.txt | httpx -silent > $OUTPUT_DIR/live_urls.txt
+cat $OUTPUT_DIR/subs.txt | $HTTPX -silent > $OUTPUT_DIR/live_urls.txt
 echo "[*] Found $(wc -l < $OUTPUT_DIR/live_urls.txt) live web targets"
 
 # 6. 端口扫描（主域名）
