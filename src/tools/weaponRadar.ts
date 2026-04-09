@@ -1,37 +1,32 @@
 /**
  * WeaponRadar — 武器库语义检索工具
  *
- * 调用 poc/weapon_radar_query.py，对公司 22W Nuclei PoC 数据库
- * 进行自然语言向量检索（BGE-M3 + pgvector），返回最匹配的漏洞武器。
+ * 通过 HTTP 调用 WeaponRadar API 服务（/project/poc_db/server.py），
+ * 对 22W Nuclei PoC 数据库进行自然语言向量检索（BGE-M3 + pgvector）。
  *
- * 支持批量查询：queries[] 参数可传入多个查询，模型只加载一次（避免 2×60s 开销）。
- *
- * 注意：首次调用需加载 BGE-M3 模型，约 30-60 秒；后续调用因 OS 缓存
- * 会快很多。超时设为 180s 以覆盖最慢情况。
+ * API 地址通过环境变量 WEAPON_RADAR_URL 配置，默认 http://127.0.0.1:8765
  */
 
-import { exec } from 'child_process'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 
-import path from 'path'
-import { fileURLToPath } from 'url'
+function getApiBase(): string {
+  return (process.env.WEAPON_RADAR_URL ?? 'http://127.0.0.1:8765').replace(/\/$/, '')
+}
 
-const _dir = path.dirname(fileURLToPath(import.meta.url))
-const RADAR_SCRIPT = path.resolve(_dir, '../../poc/weapon_radar_query.py')
-const TIMEOUT_MS   = 180_000   // 3 分钟：首次加载 BGE-M3 可能需要 60s+
+const TIMEOUT_MS = 180_000   // 3 分钟：首次请求需等模型加载
 
 interface RadarResult {
-  rank:             number
-  id:               number
-  module_name:      string
-  attack_logic:     string
-  opsec_risk?:      number
-  cve_list?:        string[]
+  rank:              number
+  id:                number
+  module_name:       string
+  attack_logic:      string
+  opsec_risk?:       number
+  cve_list?:         string[]
   required_options?: Record<string, string>
-  auto_parameters?: Record<string, string>
-  score:            number
-  score_pct:        number
-  poc_code?:        string
+  auto_parameters?:  Record<string, string>
+  score:             number
+  score_pct:         number
+  poc_code?:         string
 }
 
 interface RadarOutput {
@@ -41,10 +36,6 @@ interface RadarOutput {
   encode_ms: number
   search_ms: number
   error?:    string
-}
-
-interface BatchOutput {
-  batch: (RadarOutput & { error?: string })[]
 }
 
 function formatSingleResult(output: RadarOutput): string {
@@ -69,11 +60,9 @@ function formatSingleResult(output: RadarOutput): string {
       lines.push(`    参数说明: ${JSON.stringify(r.auto_parameters)}`)
     }
 
-    // PoC 代码 + 可执行命令
     if (r.poc_code) {
-      // 写到临时文件的建议路径
       const safeName = r.module_name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60)
-      const tmpPath = `/tmp/poc_${safeName}.yaml`
+      const tmpPath  = `/tmp/poc_${safeName}.yaml`
       lines.push(`    ▶ 执行方式:`)
       lines.push(`      cat > ${tmpPath} << 'NUCLEI_EOF'`)
       lines.push(r.poc_code)
@@ -89,8 +78,8 @@ function formatSingleResult(output: RadarOutput): string {
   return lines.join('\n').trimEnd()
 }
 
-function formatBatchResults(batch: BatchOutput): string {
-  return batch.batch.map((output, i) => {
+function formatBatchResults(outputs: RadarOutput[]): string {
+  return outputs.map((output, i) => {
     if (output.error) {
       return `[${i + 1}] 查询 "${output.query}" 失败: ${output.error}`
     }
@@ -99,6 +88,30 @@ function formatBatchResults(batch: BatchOutput): string {
     }
     return formatSingleResult(output)
   }).join('\n\n' + '═'.repeat(72) + '\n\n')
+}
+
+async function fetchWithTimeout(url: string, body: unknown, signal?: AbortSignal): Promise<RadarOutput | RadarOutput[]> {
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS)
+
+  // 如果外部取消也触发 abort
+  signal?.addEventListener('abort', () => ac.abort(), { once: true })
+
+  try {
+    const resp = await fetch(url, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+      signal:  ac.signal,
+    })
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '')
+      throw new Error(`HTTP ${resp.status}: ${text}`)
+    }
+    return await resp.json() as RadarOutput | RadarOutput[]
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export class WeaponRadarTool implements Tool {
@@ -118,9 +131,7 @@ export class WeaponRadarTool implements Tool {
 
 返回结果包含：攻击逻辑分析、完整可执行 PoC YAML、nuclei 执行命令（可直接复制运行）。
 
-⚠️ 首次调用需加载语义模型（约 30-60 秒），请耐心等待。
-
-批量查询优化：如需同时检索多个目标/漏洞，使用 queries[] 参数，模型只加载一次，比多次调用快 3-5 倍。`,
+批量查询优化：如需同时检索多个目标/漏洞，使用 queries[] 参数，比多次调用快很多。`,
       parameters: {
         type: 'object',
         properties: {
@@ -131,11 +142,11 @@ export class WeaponRadarTool implements Tool {
           queries: {
             type: 'array',
             items: { type: 'string' },
-            description: '批量查询（推荐）：多个查询组成的数组，模型只加载一次。例如：["Apache Log4j RCE", "WordPress 文件上传", "Spring Boot Actuator"]',
+            description: '批量查询（推荐）：多个查询组成的数组。例如：["Apache Log4j RCE", "WordPress 文件上传", "Spring Boot Actuator"]',
           },
           top_k: {
             type: 'number',
-            description: '每个查询返回结果数量，默认 3，最多 10。发现目标服务时建议用 5，针对性查找用 3。',
+            description: '每个查询返回结果数量，默认 3，最多 10。',
           },
           hide_code: {
             type: 'boolean',
@@ -148,129 +159,59 @@ export class WeaponRadarTool implements Tool {
   }
 
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const query     = input.query as string | undefined
-    const queries   = input.queries as string[] | undefined
-    const topK      = Math.min(Math.max(Number(input.top_k ?? 3), 1), 10)
-    const hideCode  = Boolean(input.hide_code ?? false)
+    const query    = input.query as string | undefined
+    const queries  = input.queries as string[] | undefined
+    const topK     = Math.min(Math.max(Number(input.top_k ?? 3), 1), 10)
+    const hideCode = Boolean(input.hide_code ?? false)
+    const base     = getApiBase()
 
-    // 批量模式：queries[] 优先
-    if (queries && queries.length > 0) {
-      const batchItems = queries.map(q => ({ query: q.trim(), top_k: topK }))
-      const batchJson = JSON.stringify(batchItems).replace(/'/g, "'\\''")
-      const cmd = [
-        `python3 ${RADAR_SCRIPT}`,
-        `--batch-json '${batchJson}'`,
-        hideCode ? '--no-code' : '',
-      ].filter(Boolean).join(' ')
+    try {
+      // 批量模式
+      if (queries && queries.length > 0) {
+        const resp = await fetchWithTimeout(
+          `${base}/batch`,
+          {
+            queries: queries.map(q => ({ query: q.trim(), top_k: topK })),
+            no_code: hideCode,
+          },
+          context.signal,
+        ) as unknown as { results: RadarOutput[] }
 
-      return this._runCmd(cmd, context, `批量(${queries.length}个查询)`)
-    }
-
-    // 单查询模式
-    if (!query || !query.trim()) {
-      return { content: 'Error: 必须提供 query 或 queries 参数', isError: true }
-    }
-
-    const escapedQuery = query.replace(/'/g, "'\\''")
-    const cmd = [
-      `python3 ${RADAR_SCRIPT}`,
-      `-q '${escapedQuery}'`,
-      `-n ${topK}`,
-      hideCode ? '--no-code' : '',
-    ].filter(Boolean).join(' ')
-
-    return this._runCmd(cmd, context, query)
-  }
-
-  private _runCmd(cmd: string, context: ToolContext, label: string): Promise<ToolResult> {
-    return new Promise<ToolResult>((resolve) => {
-      let settled = false
-
-      const child = exec(cmd, {
-        timeout: TIMEOUT_MS,
-        maxBuffer: 10 * 1024 * 1024,   // 10MB：PoC 代码可能很长
-        cwd: context.cwd,
-        env: { ...process.env },
-      }, (err, stdout, stderr) => {
-        if (context.signal) context.signal.removeEventListener('abort', onAbort)
-        if (settled) return
-        settled = true
-
-        if (context.signal?.aborted) {
-          resolve({ content: 'WeaponRadar: 已取消', isError: true })
-          return
-        }
-
-        if (err) {
-          const nodeErr = err as NodeJS.ErrnoException & { killed?: boolean }
-          if (nodeErr.killed) {
-            resolve({ content: `WeaponRadar: 超时（>${TIMEOUT_MS / 1000}s），模型加载过慢或数据库无响应`, isError: true })
-            return
-          }
-          const raw = stdout.trim() || stderr.trim()
-          try {
-            const parsed = JSON.parse(raw) as RadarOutput
-            if (parsed.error) {
-              resolve({ content: `WeaponRadar 错误: ${parsed.error}`, isError: true })
-              return
-            }
-          } catch { /* 非 JSON，直接输出 */ }
-          resolve({
-            content: `WeaponRadar 执行失败 (exit ${(err as NodeJS.ErrnoException).code ?? 1}):\n${raw}`,
-            isError: true,
-          })
-          return
-        }
-
-        // 成功 — 解析 JSON 并格式化
-        const raw = stdout.trim()
-        let parsed: RadarOutput | BatchOutput
-        try {
-          parsed = JSON.parse(raw) as RadarOutput | BatchOutput
-        } catch {
-          resolve({ content: raw || '(无输出)', isError: false })
-          return
-        }
-
-        // 批量模式响应
-        if ('batch' in parsed) {
-          resolve({ content: formatBatchResults(parsed as BatchOutput), isError: false })
-          return
-        }
-
-        const single = parsed as RadarOutput
-        if (single.error) {
-          resolve({ content: `WeaponRadar 错误: ${single.error}`, isError: true })
-          return
-        }
-
-        if (!single.results || single.results.length === 0) {
-          resolve({ content: `武器库中未找到匹配 "${label}" 的 PoC，尝试换用不同关键词。`, isError: false })
-          return
-        }
-
-        resolve({ content: formatSingleResult(single), isError: false })
-      })
-
-      const onAbort = () => {
-        if (settled) return
-        settled = true
-        const pid = child.pid
-        if (pid !== undefined) {
-          try { process.kill(-pid, 'SIGTERM') } catch {
-            try { child.kill('SIGTERM') } catch { /* ignore */ }
-          }
-        }
-        resolve({ content: 'WeaponRadar: 已取消', isError: true })
+        return { content: formatBatchResults(resp.results), isError: false }
       }
 
-      if (context.signal) {
-        if (context.signal.aborted) {
-          onAbort()
-        } else {
-          context.signal.addEventListener('abort', onAbort, { once: true })
+      // 单查询模式
+      if (!query?.trim()) {
+        return { content: 'Error: 必须提供 query 或 queries 参数', isError: true }
+      }
+
+      const resp = await fetchWithTimeout(
+        `${base}/query`,
+        { query: query.trim(), top_k: topK, no_code: hideCode },
+        context.signal,
+      ) as RadarOutput
+
+      if (resp.error) {
+        return { content: `WeaponRadar 错误: ${resp.error}`, isError: true }
+      }
+      if (!resp.results || resp.results.length === 0) {
+        return { content: `武器库中未找到匹配 "${query}" 的 PoC，尝试换用不同关键词。`, isError: false }
+      }
+
+      return { content: formatSingleResult(resp), isError: false }
+
+    } catch (err: unknown) {
+      const e = err as Error
+      if (e.name === 'AbortError') {
+        return { content: 'WeaponRadar: 已取消', isError: true }
+      }
+      if (e.message?.includes('fetch failed') || e.message?.includes('ECONNREFUSED')) {
+        return {
+          content: `WeaponRadar: 无法连接 API 服务 ${base}\n请确认 weapon-radar 服务正在运行：systemctl status weapon-radar`,
+          isError: true,
         }
       }
-    })
+      return { content: `WeaponRadar 请求失败: ${e.message}`, isError: true }
+    }
   }
 }

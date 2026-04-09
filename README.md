@@ -274,32 +274,40 @@ Orchestrator (主引擎, 200轮上限)
 |------|------|
 | 数据库 | PostgreSQL 127.0.0.1:5432，用户/密码 `msf/msf`，库名 `msf` |
 | 表名 | `nuclei_exploits` |
-| 数据量 | 22 万条，全部含 `full_poc_code` |
+| 数据量 | 217,358 条，全部含 `full_poc_code` |
 | 向量索引 | HNSW（`poc_vector vector_cosine_ops`） |
-| 嵌入模型 | BGE-M3（768 维，sentence-transformers） |
-| 字段 | `id / module_name / full_poc_code / ai_analysis / cve_list / required_options / poc_vector` |
+| 嵌入模型 | BGE-M3（1024 维，sentence-transformers） |
+| 字段 | `id / module_name / module_path / rank_score / full_poc_code / ai_analysis / cve_list / required_options / poc_vector` |
 
-### 查询接口
+**rank_score 质量评级：**
 
-```bash
-# 单查询（默认返回完整PoC代码）
-python3 poc/weapon_radar_query.py -q "Apache Shiro 反序列化" -n 3
+| rank_score | label | 数量 | 含义 |
+|-----------|-------|------|------|
+| 600 | critical | 22,603 | 已验证可利用（RCE / Auth Bypass 等） |
+| 500 | high | 46,256 | 高危漏洞检测 |
+| 300 | medium | 78,548 | 中危漏洞检测 |
+| 100 | low | 50,215 | 低危/信息泄露 |
+| 0 | info | 19,736 | 指纹识别/版本检测 |
 
-# 批量查询（一次加载模型，处理多个查询）
-python3 poc/weapon_radar_query.py \
-  --batch-json '[{"query":"WordPress RCE","top_k":3},{"query":"Log4j","top_k":3}]'
+### HTTP API（/project/poc_db/server.py，端口 8765）
 
-# 不要PoC代码（只看匹配结果）
-python3 poc/weapon_radar_query.py -q "SSRF" --no-code
-```
+| 接口 | 说明 |
+|------|------|
+| `GET /health` | 健康检查 |
+| `GET /stats` | 数据库统计（总量/评级分布） |
+| `POST /query` | 自然语言语义检索，返回 `rank_score/severity/tags/poc_code` 等完整字段 |
+| `POST /batch` | 批量语义检索，共享已加载模型 |
+| `GET /cve/<id>` | 按 CVE 编号精确直查（如 `/cve/CVE-2021-44228`） |
 
-### WeaponRadar 工具用法
+### WeaponRadar 工具用法（引擎侧，HTTP 调用）
 
 ```
 WeaponRadar({queries: ["Apache Log4j RCE", "Shiro 反序列化", "Jenkins RCE"]})
-// 批量模式，模型只加载一次
-// 返回：完整PoC YAML + nuclei 执行命令 + CVE列表 + 风险级别
+// 批量模式，HTTP POST /batch
+// 返回：rank_label / severity / tags / attack_logic / poc_code / nuclei 执行命令
 ```
+
+> 引擎通过 `WEAPON_RADAR_URL` 环境变量指定 API 地址（默认 `http://127.0.0.1:8765`）。
 
 ---
 
