@@ -1,13 +1,13 @@
 {
   "id": "f001",
-  "title": "WordPress 6.9.4 暴露于公网",
+  "title": "WordPress 识别",
   "type": "info-disclosure",
   "target": "http://zhhovo.top",
-  "severity": "medium",
+  "severity": "info",
   "phase": "recon",
-  "description": "通过 WhatWeb 识别出目标运行 WordPress 6.9.4 和 Elementor 3.32.3。WordPress 是常见攻击面，需检查版本相关漏洞。",
-  "poc": "whatweb http://zhhovo.top",
-  "mitre_ttp": "T1595.001 (Active Scanning: Scanning IP Blocks)",
+  "description": "目标网站使用 WordPress CMS，通过 HTTP 响应头中的 Link 字段和页面内容确认。WordPress 可能存在已知漏洞，需要进一步测试。",
+  "poc": "curl -I http://zhhovo.top/ | grep \"Link:\"",
+  "mitre_ttp": "T1595.002",
   "status": "open",
   "timestamp": "2026-04-09T02:17:27.396Z"
 }

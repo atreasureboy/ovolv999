@@ -19,12 +19,16 @@ description: 完整渗透测试侦察流程
 
 ```bash
 # 设置工具 PATH
-export PATH=$PATH:/root/go/bin:/root/.pdtm/go/bin
+export PATH=$PATH:/root/go/bin:/root/.pdtm/go/bin:/root/.local/bin
 
-# 设置目标
+# 设置目标（替换为实际目标）
 TARGET="target.com"
 TARGET_IP="1.2.3.4"
-OUTPUT_DIR="./recon_$(date +%Y%m%d_%H%M%S)"
+
+# OUTPUT_DIR 使用 session 目录（已由 ovogogogo 在 prompt 中注入，直接引用）
+# 如果手动运行，可以设置：
+# OUTPUT_DIR="/path/to/sessions/target_YYYYMMDD_HHMMSS"
+OUTPUT_DIR="${SESSION_DIR:-./sessions/manual_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p $OUTPUT_DIR
 ```
 

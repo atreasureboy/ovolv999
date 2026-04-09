@@ -1,1 +1,0 @@
-# Nmap 7.94SVN scan initiated Thu Apr  9 02:10:52 2026 as: nmap -p- -sV -sC --open -T4 -oA /project/ovogogogo/nmap_full_zhhovo_top zhhovo.top

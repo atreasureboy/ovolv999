@@ -26,8 +26,8 @@
  *   ~/.ovogo/skills/*.md  — global user slash commands
  */
 
-import { resolve } from 'path'
-import { writeFileSync } from 'fs'
+import { resolve, join } from 'path'
+import { writeFileSync, mkdirSync } from 'fs'
 import { ExecutionEngine } from '../src/core/engine.js'
 import { Renderer } from '../src/ui/renderer.js'
 import { InputHandler, readStdin } from '../src/ui/input.js'
@@ -62,7 +62,7 @@ function parseArgs(argv: string[]): Args {
   const args = argv.slice(2)
   let task: string | undefined
   let model = process.env.OVOGO_MODEL ?? 'gpt-4o'
-  let maxIter = parseInt(process.env.OVOGO_MAX_ITER ?? '30', 10)
+  let maxIter = parseInt(process.env.OVOGO_MAX_ITER ?? '200', 10)
   let cwd = process.env.OVOGO_CWD ?? process.cwd()
   let help = false
   let version = false
@@ -94,7 +94,7 @@ function printHelp(skills: Map<string, Skill>): void {
 
 OPTIONS
   -m, --model <model>    LLM model  (env: OVOGO_MODEL, default: gpt-4o)
-  --max-iter <n>         Think-Act-Observe max cycles  (env: OVOGO_MAX_ITER, default: 30)
+  --max-iter <n>         Think-Act-Observe max cycles  (env: OVOGO_MAX_ITER, default: 200)
   --cwd <path>           Working directory  (env: OVOGO_CWD, default: cwd)
   -v, --version          Print version and exit
   -h, --help             Show this help
@@ -142,6 +142,29 @@ EXAMPLES
   ovogogogo -m gpt-4o --cwd /my/project "write unit tests"
   echo "install and test" | ovogogogo
 `)
+}
+
+// ─────────────────────────────────────────────────────────────
+// Session directory — 按目标+时间戳隔离扫描输出
+// ─────────────────────────────────────────────────────────────
+
+function createSessionDir(cwd: string, primaryTarget?: string): string {
+  const targetSlug = (primaryTarget ?? 'session')
+    .replace(/^https?:\/\//, '')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 64)
+
+  const ts = new Date()
+    .toISOString()
+    .replace('T', '_')
+    .replace(/:/g, '')
+    .slice(0, 15)   // YYYYMMDD_HHMMSS
+
+  const dirName = `${targetSlug}_${ts}`
+  const sessionDir = join(cwd, 'sessions', dirName)
+  mkdirSync(sessionDir, { recursive: true })
+  return sessionDir
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -554,9 +577,14 @@ async function main(): Promise<void> {
     }
   }
 
-  // Build the full system prompt once (OVOGO.md + memory + engagement injected)
+  // Create per-session output directory
+  const primaryTarget = engagement?.targets?.[0]
+  const sessionDir = createSessionDir(cwd, primaryTarget)
+  renderer.info(`Session dir: ${sessionDir}`)
+
+  // Build the full system prompt once (OVOGO.md + memory + engagement + sessionDir injected)
   const memorySection = buildMemorySystemSection(memoryDir)
-  const systemPrompt = buildFullSystemPrompt(cwd, ovogoMdFiles, memorySection, engagement)
+  const systemPrompt = buildFullSystemPrompt(cwd, ovogoMdFiles, memorySection, engagement, sessionDir)
 
   // Load MCP servers (non-fatal if config missing)
   let mcpConnections: ConnectedMcpClient[] = []

@@ -1,0 +1,13 @@
+{
+  "id": "f002",
+  "title": "开放高危端口",
+  "type": "misconfig",
+  "target": "zhhovo.top",
+  "severity": "high",
+  "phase": "recon",
+  "description": "目标服务器开放了多个高危端口，包括 FTP(21)、SSH(22)、MySQL(3306)、Redis(6379) 和 MongoDB(27017)。这些服务可能配置不当或存在弱密码，可被利用进行初始访问。",
+  "poc": "nmap -p 21,22,3306,6379,27017 zhhovo.top",
+  "mitre_ttp": "T1046",
+  "status": "open",
+  "timestamp": "2026-04-09T02:40:14.394Z"
+}

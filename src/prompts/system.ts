@@ -21,11 +21,13 @@ function getDateSection(): string {
   return now.toISOString().split('T')[0]
 }
 
-export function getSystemPrompt(cwd: string, engagement?: EngagementScope): string {
+export function getSystemPrompt(cwd: string, engagement?: EngagementScope, sessionDir?: string): string {
   const os = getOSInfo()
   const date = getDateSection()
 
-  const engagementSection = engagement ? formatEngagementSection(engagement) : ''
+  const engagementSection = engagement ? formatEngagementSection(engagement, sessionDir) : (
+    sessionDir ? `\n# 本次会话输出目录\n所有扫描结果、日志、截图必须保存到：**${sessionDir}**\n` : ''
+  )
 
   return `你是 ovogogogo，一个专为红队渗透测试设计的自主执行引擎，具备深度网络安全专业知识。
 
@@ -132,7 +134,7 @@ nuclei 全模板 / hydra 爆破 / 大子网扫描
 无需逐步请求确认，自主推进任务。`
 }
 
-function formatEngagementSection(e: EngagementScope): string {
+function formatEngagementSection(e: EngagementScope, sessionDir?: string): string {
   const lines: string[] = ['\n# 当前交战上下文 (Engagement)']
 
   if (e.name) lines.push(`- 任务名称: ${e.name}`)
@@ -152,6 +154,14 @@ function formatEngagementSection(e: EngagementScope): string {
   }
 
   if (e.notes) lines.push(`- 备注: ${e.notes}`)
+
+  if (sessionDir) {
+    lines.push(`\n## 本次会话输出目录（重要）`)
+    lines.push(`所有扫描结果、工具输出、截图、日志文件必须保存到：`)
+    lines.push(`  **${sessionDir}**/`)
+    lines.push(`不得将文件写到项目根目录或 /tmp（除非是临时中间文件）。`)
+    lines.push(`使用绝对路径：${sessionDir}/nmap.txt、${sessionDir}/nuclei.txt 等。`)
+  }
 
   return lines.join('\n')
 }
@@ -177,8 +187,9 @@ export function buildFullSystemPrompt(
   ovogoMdFiles: OvogoMdFile[],
   memorySection: string,
   engagement?: EngagementScope,
+  sessionDir?: string,
 ): string {
-  const parts: string[] = [getSystemPrompt(cwd, engagement)]
+  const parts: string[] = [getSystemPrompt(cwd, engagement, sessionDir)]
 
   const ovogoMdSection = formatOvogoMdForPrompt(ovogoMdFiles)
   if (ovogoMdSection) {
