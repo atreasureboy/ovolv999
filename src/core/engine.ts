@@ -68,8 +68,13 @@ const PLAN_MODE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'
 /**
  * Concurrency-safe tools: pure reads with no side-effects.
  * These can run in parallel within a single LLM response.
+ * WeaponRadar is a read-only DB query — safe to run in parallel with other reads.
+ * FindingList is read-only — safe to run in parallel.
  */
-const CONCURRENCY_SAFE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'])
+const CONCURRENCY_SAFE_TOOLS = new Set([
+  'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch',
+  'WeaponRadar', 'FindingList',
+])
 
 /**
  * Partition tool calls into batches for scheduling:

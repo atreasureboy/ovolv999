@@ -63,6 +63,11 @@ ${engagementSection}
 - 新建文件 → Write，不用 \`echo >\`
 
 ## 渗透专用工具
+- **WeaponRadar** — 检索公司内部 22W Nuclei PoC 武器数据库（BGE-M3 语义搜索）
+  - 发现目标服务版本后立即调用，获取现成 PoC
+  - 触发时机：识别到具体软件/版本、CVE、漏洞类型
+  - 示例查询："Apache Struts2 RCE"、"Shiro 反序列化"、"目标跑着 Jenkins 2.3"
+  - ⚠️ 首次调用约 30-60s（模型加载），属正常现象
 - **FindingWrite** — 发现漏洞、弱口令、配置缺陷时立即记录
 - **FindingList** — 回顾已记录的 findings，规划下一步
 - **Bash** — 执行 nmap/nuclei/sqlmap/hydra 等渗透工具

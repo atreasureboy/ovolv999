@@ -14,6 +14,7 @@ import { WebFetchTool } from './webFetch.js'
 import { WebSearchTool } from './webSearch.js'
 import { AgentTool } from './agent.js'
 import { FindingWriteTool, FindingListTool } from './finding.js'
+import { WeaponRadarTool } from './weaponRadar.js'
 
 export function createTools(extraTools: Tool[] = []): Tool[] {
   return [
@@ -29,6 +30,7 @@ export function createTools(extraTools: Tool[] = []): Tool[] {
     new AgentTool(),
     new FindingWriteTool(),
     new FindingListTool(),
+    new WeaponRadarTool(),
     ...extraTools,
   ]
 }
@@ -53,4 +55,5 @@ export {
   WebSearchTool,
   FindingWriteTool,
   FindingListTool,
+  WeaponRadarTool,
 }

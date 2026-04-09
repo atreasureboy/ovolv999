@@ -116,6 +116,7 @@ TOOLS
   Agent         Spawn a sub-agent (explore/plan/code-reviewer/general-purpose)
   FindingWrite  Record a vulnerability finding (persisted to .ovogo/findings/)
   FindingList   List all findings with optional filters
+  WeaponRadar   Semantic search over 22W internal Nuclei PoC database (BGE-M3)
 
 REPL COMMANDS
   /plan <task>   Run task in plan mode (read-only analysis + confirm before execute)
