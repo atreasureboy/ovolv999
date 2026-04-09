@@ -104,16 +104,18 @@ ENVIRONMENT
   OPENAI_BASE_URL        Optional — compatible endpoint URL
 
 TOOLS
-  Bash       Execute shell commands
-  Read       Read file contents
-  Write      Write/create files
-  Edit       Precise string replacement in files
-  Glob       Find files by glob pattern
-  Grep       Search file contents with regex
-  TodoWrite  Task checklist management
-  WebFetch   Fetch URL content as plain text
-  WebSearch  Search the web
-  Agent      Spawn a sub-agent (explore/plan/code-reviewer/general-purpose)
+  Bash          Execute shell commands and pentest tools
+  Read          Read file contents
+  Write         Write/create files
+  Edit          Precise string replacement in files
+  Glob          Find files by glob pattern
+  Grep          Search file contents with regex
+  TodoWrite     Task checklist management
+  WebFetch      Fetch URL content as plain text
+  WebSearch     Search the web
+  Agent         Spawn a sub-agent (explore/plan/code-reviewer/general-purpose)
+  FindingWrite  Record a vulnerability finding (persisted to .ovogo/findings/)
+  FindingList   List all findings with optional filters
 
 REPL COMMANDS
   /plan <task>   Run task in plan mode (read-only analysis + confirm before execute)
@@ -543,9 +545,18 @@ async function main(): Promise<void> {
     renderer.info(`Memory: initialized — ${memoryDir}`)
   }
 
-  // Build the full system prompt once (OVOGO.md + memory injected)
+  // Show engagement scope if configured
+  const engagement = settings.engagement
+  if (engagement) {
+    renderer.info(`Engagement: ${engagement.name ?? '未命名'} · 阶段: ${engagement.phase ?? '未设置'}`)
+    if (engagement.targets && engagement.targets.length > 0) {
+      renderer.info(`Targets: ${engagement.targets.join(', ')}`)
+    }
+  }
+
+  // Build the full system prompt once (OVOGO.md + memory + engagement injected)
   const memorySection = buildMemorySystemSection(memoryDir)
-  const systemPrompt = buildFullSystemPrompt(cwd, ovogoMdFiles, memorySection)
+  const systemPrompt = buildFullSystemPrompt(cwd, ovogoMdFiles, memorySection, engagement)
 
   // Load MCP servers (non-fatal if config missing)
   let mcpConnections: ConnectedMcpClient[] = []

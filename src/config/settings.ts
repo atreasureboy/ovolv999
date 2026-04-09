@@ -43,8 +43,30 @@ export interface HooksConfig {
   UserPromptSubmit?: HookEntry[]
 }
 
+/**
+ * 渗透测试交战范围与上下文
+ * 配置在 .ovogo/settings.json 的 "engagement" 字段
+ */
+export interface EngagementScope {
+  /** 任务名称，如 "ZhhovoTop 外网渗透 2026-Q2" */
+  name?: string
+  /** 当前渗透阶段 */
+  phase?: 'recon' | 'initial-access' | 'lateral-movement' | 'post-exploitation' | 'exfiltration'
+  /** 授权目标列表（IP、CIDR、域名） */
+  targets?: string[]
+  /** 明确排除的目标（不得触碰） */
+  out_of_scope?: string[]
+  /** 任务开始日期 ISO 8601 */
+  start_date?: string
+  /** 任务截止日期 ISO 8601 */
+  end_date?: string
+  /** 额外备注（客户联系人、特殊要求等） */
+  notes?: string
+}
+
 export interface OvogoSettings {
   hooks?: HooksConfig
+  engagement?: EngagementScope
 }
 
 function tryParse(path: string): OvogoSettings {

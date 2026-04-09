@@ -13,15 +13,49 @@ IMPORTANT: Avoid using this for file operations when dedicated tools exist:
 - Edit files: Use EditFile (NOT sed/awk)
 - Write files: Use WriteFile (NOT echo > or cat <<EOF)
 
-Reserve Bash for: running scripts, package installation, git operations, test execution, and system commands.
+Reserve Bash for: security tools (nmap/nuclei/sqlmap/hydra/...), shell commands, scripts, system operations.
 
-Instructions:
+## Timeout Strategy (CRITICAL for security tools)
+
+Default timeout: **300 seconds (5 min)**. Max: **14400 seconds (4 hours)**.
+
+Always set an explicit timeout for security scans based on expected duration:
+- Quick scans (top ports, single host): timeout=120000
+- Standard scans (full ports, service detection): timeout=600000
+- Deep scans (nuclei full, hydra brute): timeout=3600000
+- Extended operations (nuclei -t all, large subnet): timeout=14400000
+
+## Background Pattern for Long-Running Scans
+
+For scans expected to run >5 minutes, ALWAYS use background mode to avoid blocking:
+
+\`\`\`
+# Step 1: Launch in background, redirect output to file
+run_in_background=true
+command: "nuclei -u https://target.com -o /tmp/nuclei_out.txt 2>&1"
+
+# Step 2 (later): Check progress or read results
+command: "tail -50 /tmp/nuclei_out.txt"
+
+# Or wait for completion and read
+command: "wait && cat /tmp/nuclei_out.txt"
+\`\`\`
+
+## Parallel Scanning
+
+To run multiple scans simultaneously, call Bash multiple times with run_in_background=true in the SAME response.
+All background jobs start simultaneously. Check results later by reading their output files.
+
+Example: Launch nmap + nuclei + subfinder all at once:
+- Call 1: nmap scan → /tmp/nmap.txt (background)
+- Call 2: subfinder scan → /tmp/subs.txt (background)
+- Call 3: httpx probe → /tmp/httpx.txt (background)
+Then in next turn: read all three output files.
+
+## Other Instructions
 - Always quote paths with spaces: "path with spaces/file.txt"
 - Use absolute paths to avoid cwd confusion
-- For multiple independent commands, make parallel tool calls
-- For dependent sequential commands, chain with && in one call
-- Default timeout: 120 seconds
-- Use run_in_background=true for long-running processes you don't need to wait for`
+- For dependent sequential commands, chain with && in one call`
 
 export const READ_FILE_DESCRIPTION = `Reads a file from the filesystem and returns its contents with line numbers.
 

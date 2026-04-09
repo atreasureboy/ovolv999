@@ -13,6 +13,7 @@ import { TodoWriteTool } from './todo.js'
 import { WebFetchTool } from './webFetch.js'
 import { WebSearchTool } from './webSearch.js'
 import { AgentTool } from './agent.js'
+import { FindingWriteTool, FindingListTool } from './finding.js'
 
 export function createTools(extraTools: Tool[] = []): Tool[] {
   return [
@@ -26,6 +27,8 @@ export function createTools(extraTools: Tool[] = []): Tool[] {
     new WebFetchTool(),
     new WebSearchTool(),
     new AgentTool(),
+    new FindingWriteTool(),
+    new FindingListTool(),
     ...extraTools,
   ]
 }
@@ -48,4 +51,6 @@ export {
   TodoWriteTool,
   WebFetchTool,
   WebSearchTool,
+  FindingWriteTool,
+  FindingListTool,
 }

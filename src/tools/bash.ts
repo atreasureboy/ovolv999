@@ -12,7 +12,8 @@ import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/type
 import { BASH_DESCRIPTION } from '../prompts/tools.js'
 
 const MAX_OUTPUT_LENGTH = 30_000
-const DEFAULT_TIMEOUT_MS = 120_000
+const DEFAULT_TIMEOUT_MS = 300_000   // 5 min — 安全扫描最低要求
+const MAX_TIMEOUT_MS = 14_400_000    // 4 h — nuclei/hydra 等长时间扫描
 
 export interface BashInput {
   command: string
@@ -71,7 +72,7 @@ export class BashTool implements Tool {
 
     const timeoutMs = Math.min(
       typeof timeout === 'number' ? timeout : DEFAULT_TIMEOUT_MS,
-      600_000,
+      MAX_TIMEOUT_MS,
     )
 
     // ── Background mode (fire-and-forget) ───────────────────────
