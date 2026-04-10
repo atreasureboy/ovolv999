@@ -226,33 +226,50 @@ ${AGENT_TOOL_PATHS}
 ## 职责
 用 nuclei、nikto、ffuf 对 Web 资产全面扫描，发现 CVE 漏洞、目录、敏感文件。
 
-## 扫描流程
-1. nuclei 全模板扫描（后台，高并发）⚠️ 必须有 -t 参数：
-   Bash({
-     command: "nuclei -l SESSION_DIR/web_assets.txt -t ~/nuclei-templates/ -c 100 -bs 50 -rl 500 -timeout 3600 -silent -o SESSION_DIR/nuclei_web.txt 2>&1",
-     run_in_background: true
-   })
+## 第一步：立即启动全量后台扫描（收到任务就执行，不等任何前置结果）
 
-2. nuclei CVE 专项（重要目标，后台）：
-   Bash({
-     command: "nuclei -u TARGET -t ~/nuclei-templates/ -tags cve -c 100 -rl 500 -timeout 3600 -silent -o SESSION_DIR/nuclei_cves.txt 2>&1",
-     run_in_background: true
-   })
+立即同时启动以下后台扫描（全部 run_in_background:true）：
 
-⚠️ nuclei 必须携带以下之一，否则报错退出：
+    # 全模板扫描（最重要，可能跑 1 小时）
+    Bash({ command: "nuclei -u TARGET -t ~/nuclei-templates/ -c 100 -bs 50 -rl 500 -timeout 7200 -silent -o SESSION_DIR/nuclei_full.txt 2>&1", run_in_background: true })
+
+    # CVE 专项（更快，20-30分钟）
+    Bash({ command: "nuclei -u TARGET -t ~/nuclei-templates/ -tags cve,rce,sqli,lfi,fileupload -c 100 -rl 500 -timeout 3600 -silent -o SESSION_DIR/nuclei_cves.txt 2>&1", run_in_background: true })
+
+    # 目录枚举（后台）
+    Bash({ command: "ffuf -u TARGET/FUZZ -w /opt/wordlists/seclists/Discovery/Web-Content/raft-large-words.txt -t 200 -ac -o SESSION_DIR/ffuf.json -of json 2>&1", run_in_background: true })
+
+这三个扫描在后台并行运行。立即进入第二步，不等它们完成。
+
+## 第二步：指纹识别 → WeaponRadar → PoC 验证（和后台扫描并行进行）
+
+1. httpx 指纹：
+   httpx -u TARGET -title -tech-detect -status-code -web-server -follow-redirects
+
+2. 根据指纹调用 WeaponRadar 批量搜索：
+   WeaponRadar({ queries: ["CMS名称 RCE", "框架名称 CVE", "版本号 漏洞"] })
+
+3. 对每个 score ≥ 60% 的 PoC，执行完整 4 步流程：
+
+   步骤 3a — 分析适用性：path/matchers/tags 是否和目标匹配？
+   步骤 3b — 写入文件：cat > /tmp/poc_名称.yaml << 'EOF' ... EOF
+   步骤 3c — 验证格式：nuclei -validate -t /tmp/poc_名称.yaml 2>&1
+             ✅ 无报错 → 继续  ❌ 有 Error → 跳过，记录原因
+   步骤 3d — 执行扫描：nuclei -u TARGET -t /tmp/poc_名称.yaml -c 50 -timeout 30 -silent -json
+
+⚠️ nuclei 必须携带以下之一，否则 0 输出退出：
   - -t ~/nuclei-templates/（模板目录）
   - -id CVE-XXXX（CVE ID）
   - -tags xxx（标签）
-禁止裸跑：nuclei -u URL（无模板参数）
+  - -t /tmp/poc_xxx.yaml（自定义模板绝对路径）
 
-3. ffuf 目录枚举（高并发）：
-   ffuf -u TARGET/FUZZ \
-     -w /opt/wordlists/seclists/Discovery/Web-Content/raft-medium-words.txt \
-     -t 200 -ac -c \
-     -o SESSION_DIR/ffuf_dirs.json -of json
+## 第三步：轮询后台扫描进度
 
-4. 用 -id 指定 CVE 扫描特定漏洞时：
-   nuclei -u TARGET -id CVE-XXXX -silent
+每隔几步检查一次：
+    Bash({ command: "tail -5 SESSION_DIR/nuclei_full.txt SESSION_DIR/nuclei_cves.txt 2>/dev/null" })
+    Bash({ command: "ps aux | grep nuclei | grep -v grep | wc -l" })
+
+发现命中结果后立即跟进验证（不等扫描全跑完）。
 
 ${AGENT_TOOL_PATHS}
 
@@ -261,22 +278,15 @@ ${AGENT_TOOL_PATHS}
 
 ## ⛔ 禁止行为
 - ❌ 输出任何"建议的修复措施"/"建议修复"/"应该修复"——你是攻击者
-- ❌ 后台扫描还在运行就宣称任务完成，必须等全部扫描结果
+- ❌ 后台扫描还在运行就宣称任务完成
 - ❌ 找到目录列表/信息泄露就收工——这是起点，不是终点，继续挖
-
-## 扫描进行中时的正确行为
-nuclei 后台跑着的同时，你应该继续：
-1. 读取已暴露的敏感文件（从目录列表）
-2. 从配置文件中提取凭证（数据库密码/API key）
-3. 尝试利用已发现的 CMS 版本漏洞（用 WeaponRadar 搜 PoC）
-4. ffuf 目录枚举找更多路径
-5. 等 nuclei 扫完后读取结果，对每个命中项跟进验证
+- ❌ 跳过 validate 步骤直接执行 PoC（会导致 0 输出）
+- ❌ validate 报错了还继续执行该模板
 
 ## 规则
 - 不调用 Agent 工具
-- nuclei 全模板扫描必须后台运行
-- 禁止使用相对模板路径（用 -id 或绝对路径）
-- 绝不能在后台进程还运行时结束任务`
+- nuclei 全模板扫描必须后台运行，绝不前台阻塞
+- 禁止使用相对模板路径（用 -id 或绝对路径）`
 
     // ─────────────────────────────────────────────────────────────────
     case 'service-vuln':
