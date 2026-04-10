@@ -4,3 +4,6 @@ dist/
 .env
 progress_log.json
 ovogogogo_log.json
+upload_to_github.sh
+upload_to_github.ps1
+run_upload.bat

@@ -78,6 +78,8 @@ export interface ToolContext {
   permissionMode: 'auto' | 'ask' | 'deny'
   /** AbortSignal — tools should honour this to support Ctrl+C cancellation */
   signal?: AbortSignal
+  /** Progress update function for long-running tools */
+  updateProgress?: (progress: number, recoveryData?: Record<string, unknown>) => void
 }
 
 /**
@@ -109,6 +111,12 @@ export interface EngineConfig {
   hookRunner?: IHookRunner
   /** Session output directory — injected into sub-agent prompts */
   sessionDir?: string
+  /** Priority queue for tool execution */
+  priorityQueue?: import('./priorityQueue.js').PriorityQueue
+  /** Progress tracker for long-running tools */
+  progressTracker?: import('./progressTracker.js').ProgressTracker
+  /** Cache for tool execution results */
+  toolCache?: import('./toolCache.js').ToolCache
 }
 
 export interface TurnResult {

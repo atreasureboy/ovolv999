@@ -42,6 +42,9 @@ import type { Skill } from '../src/skills/loader.js'
 import { loadOvogoMd } from '../src/config/ovogomd.js'
 import { getMemoryDir, buildMemorySystemSection, getMemoryStats } from '../src/memory/index.js'
 import { buildFullSystemPrompt } from '../src/prompts/system.js'
+import { PriorityQueue } from '../src/core/priorityQueue.js'
+import { ProgressTracker } from '../src/core/progressTracker.js'
+import { ToolCache } from '../src/core/toolCache.js'
 
 const VERSION = '0.1.0'
 
@@ -640,6 +643,11 @@ async function main(): Promise<void> {
     renderer.warn(`MCP: "${e.server}" failed — ${e.error}`)
   }
 
+  // Initialize optimization components
+  const priorityQueue = new PriorityQueue()
+  const progressTracker = new ProgressTracker()
+  const toolCache = new ToolCache()
+
   const config: EngineConfig = {
     model,
     apiKey,
@@ -651,6 +659,9 @@ async function main(): Promise<void> {
     hookRunner,
     systemPrompt,
     sessionDir,   // injected into sub-agent prompts via registerAgentFactory
+    priorityQueue,
+    progressTracker,
+    toolCache,
   }
 
   // Plan-mode config: same system prompt + planMode=true (engine filters write tools)

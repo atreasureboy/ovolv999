@@ -33,6 +33,9 @@ import { createTools, findTool, getToolDefinitions } from '../tools/index.js'
 import { getPlanModePrefix } from '../prompts/system.js'
 import type { Renderer } from '../ui/renderer.js'
 import { maybeCompact, estimateTokens, COMPACT_THRESHOLD_TOKENS } from './compact.js'
+import { PriorityQueue, ToolTask } from './priorityQueue.js'
+import { ProgressTracker } from './progressTracker.js'
+import { ToolCache } from './toolCache.js'
 
 const MAX_TOOL_RESULT_LENGTH = 20_000
 
@@ -193,6 +196,12 @@ export class ExecutionEngine {
   private currentTurnAbortController: AbortController | null = null
   /** Soft-interrupt flag: pause after current tool finishes, preserve history */
   private softAbortRequested = false
+  /** Priority queue for tool execution */
+  private priorityQueue: PriorityQueue
+  /** Progress tracker for long-running tools */
+  private progressTracker: ProgressTracker
+  /** Cache for tool execution results */
+  private toolCache: ToolCache
 
   constructor(config: EngineConfig, renderer: Renderer) {
     this.config = config
@@ -202,6 +211,9 @@ export class ExecutionEngine {
       baseURL: config.baseURL,
     })
     this.tools = createTools(config.extraTools ?? [])
+    this.priorityQueue = config.priorityQueue || new PriorityQueue()
+    this.progressTracker = config.progressTracker || new ProgressTracker()
+    this.toolCache = config.toolCache || new ToolCache()
   }
 
   /**
@@ -580,13 +592,70 @@ export class ExecutionEngine {
       }
     }
 
+    // Check cache first
+    const cachedResult = this.toolCache.get(toolName, input)
+    if (cachedResult) {
+      this.renderer.info(`[Cache hit] ${toolName}`)
+      return cachedResult
+    }
+
     const tool = findTool(this.tools, toolName)
     if (!tool) {
       return { content: `Unknown tool: ${toolName}`, isError: true }
     }
+
+    // Generate task ID for progress tracking
+    const taskId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    
     try {
-      return await tool.execute(input, context)
+      // Start progress tracking for long-running tools
+      const isLongRunningTool = ['Bash', 'MultiScan', 'WeaponRadar', 'WebSearch'].includes(toolName)
+      if (isLongRunningTool) {
+        this.progressTracker.start(taskId, toolName, input)
+        this.renderer.info(`[Progress] Starting ${toolName} task ${taskId}`)
+      }
+
+      // Create a progress update function
+      const updateProgress = (progress: number, recoveryData?: Record<string, unknown>) => {
+        if (isLongRunningTool) {
+          this.progressTracker.update(taskId, progress, recoveryData)
+          this.renderer.info(`[Progress] ${toolName}: ${progress}%`)
+        }
+      }
+
+      // Add progress update to context
+      const enhancedContext: ToolContext & { updateProgress?: (progress: number, recoveryData?: Record<string, unknown>) => void } = {
+        ...context,
+        updateProgress
+      }
+
+      // Execute the tool
+      const result = await tool.execute(input, enhancedContext)
+
+      // Complete progress tracking
+      if (isLongRunningTool) {
+        this.progressTracker.complete(taskId, result.content)
+        this.renderer.info(`[Progress] ${toolName} completed`)
+      }
+
+      // Cache the result (only for successful, non-error results)
+      if (!result.isError) {
+        // Set shorter TTL for certain tools
+        let ttl = undefined
+        if (['WebFetch', 'WebSearch'].includes(toolName)) {
+          ttl = 1 * 60 * 60 * 1000 // 1 hour for web-based tools
+        }
+        this.toolCache.set(toolName, input, result, ttl)
+      }
+
+      return result
     } catch (err: unknown) {
+      // Handle error in progress tracking
+      if (['Bash', 'MultiScan', 'WeaponRadar', 'WebSearch'].includes(toolName)) {
+        this.progressTracker.fail(taskId, (err as Error).message)
+        this.renderer.error(`[Progress] ${toolName} failed: ${(err as Error).message}`)
+      }
+
       return {
         content: `Tool ${toolName} threw exception: ${(err as Error).message}`,
         isError: true,
