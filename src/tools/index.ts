@@ -19,6 +19,7 @@ import { MultiScanTool } from './multiScan.js'
 import { MultiAgentTool } from './multiAgent.js'
 import { ShellSessionTool } from './shellSession.js'
 import { TmuxSessionTool } from './tmuxSession.js'
+import { C2Tool } from './c2.js'
 
 export function createTools(extraTools: Tool[] = []): Tool[] {
   return [
@@ -39,6 +40,7 @@ export function createTools(extraTools: Tool[] = []): Tool[] {
     new FindingListTool(),
     new WeaponRadarTool(),
     new MultiScanTool(),
+    new C2Tool(),
     ...extraTools,
   ]
 }
@@ -68,4 +70,5 @@ export {
   MultiAgentTool,
   ShellSessionTool,
   TmuxSessionTool,
+  C2Tool,
 }
