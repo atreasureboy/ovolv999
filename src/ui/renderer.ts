@@ -495,6 +495,19 @@ export class Renderer {
     w(`\n${FG.brightBlue}❯${RESET} `)
   }
 
+  writeInterruptPrompt(): void {
+    w(
+      `\n  ${FG.brightYellow}⚡ 任务已暂停${RESET} ${DIM}— 输入建议注入对话后继续，直接回车则恢复执行${RESET}\n` +
+      `${FG.brightYellow}↳${RESET} `,
+    )
+  }
+
+  interruptInjected(msg: string): void {
+    w(
+      `\n  ${FG.brightYellow}⚡${RESET} ${DIM}已注入:${RESET} ${FG.brightWhite}${msg.slice(0, 120)}${msg.length > 120 ? '…' : ''}${RESET}\n`,
+    )
+  }
+
   newline(): void {
     w('\n')
   }

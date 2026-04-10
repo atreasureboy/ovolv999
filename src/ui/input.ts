@@ -27,8 +27,10 @@ export class InputHandler {
       historySize: 100,
     })
 
-    // Expose internal history array so we can pre-populate
-    // readline stores history in reverse order internally
+    // Prevent readline from closing on Ctrl+C (SIGINT).
+    // Without this handler readline emits 'close', which kills the REPL.
+    // Our SIGINT handler in the main entry point handles Ctrl+C instead.
+    this.rl.on('SIGINT', () => {})
   }
 
   async readLine(promptText: string): Promise<InputResult> {

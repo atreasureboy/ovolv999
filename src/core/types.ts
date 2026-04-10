@@ -113,6 +113,12 @@ export interface EngineConfig {
 
 export interface TurnResult {
   stopped: boolean
-  reason: 'max_iterations' | 'stop_sequence' | 'tool_end' | 'error'
+  /**
+   * stop_sequence  — LLM returned finish_reason=stop with no tool calls
+   * max_iterations — hit maxIterations ceiling
+   * error          — hard abort (Ctrl+C × 2) or unrecoverable API error
+   * interrupted    — soft pause requested (Ctrl+C × 1), partial history preserved
+   */
+  reason: 'max_iterations' | 'stop_sequence' | 'tool_end' | 'error' | 'interrupted'
   output: string
 }

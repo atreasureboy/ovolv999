@@ -357,23 +357,89 @@ async function runRepl(
   renderer.info(`Ctrl+C to cancel · Ctrl+D to exit`)
 
   let running = false
+  // Counts Ctrl+C presses during the current task:
+  // 1st press = soft pause (inject message), 2nd = hard cancel
+  let sigintCount = 0
 
-  // Ctrl+C: if a turn is running, tell the engine to abort it.
-  // engine.abort() propagates via AbortSignal into Bash (kills process group)
-  // and WebFetch (cancels the HTTP request)
   process.on('SIGINT', () => {
     if (running) {
-      engine.abort()
-      renderer.stopSpinner()
-      renderer.warn('Cancelled.')
-      running = false
-      renderer.writePrompt()
+      sigintCount++
+      if (sigintCount === 1) {
+        // Soft interrupt — pause after current tool finishes
+        engine.softAbort()
+        renderer.stopSpinner()
+        renderer.warn('⚡ 正在暂停... (当前工具执行完后暂停)  再按 Ctrl+C 立即取消')
+      } else {
+        // Hard cancel — kills in-flight API calls and tool processes
+        engine.abort()
+        renderer.stopSpinner()
+        renderer.warn('已取消。')
+        running = false
+      }
     } else {
       renderer.newline()
-      renderer.info('Press Ctrl+D or type /exit to quit.')
-      renderer.writePrompt()
+      renderer.info('按 Ctrl+D 或输入 /exit 退出。')
     }
   })
+
+  /**
+   * Run one task (or task continuation) through the engine.
+   * Handles the soft-interrupt resume loop internally.
+   */
+  async function runTask(prompt: string, taskHistory: OpenAIMessage[], startMs: number): Promise<void> {
+    running = true
+    sigintCount = 0
+
+    let currentPrompt   = prompt
+    let currentHistory  = taskHistory
+
+    try {
+      while (true) {
+        sigintCount = 0  // reset per-iteration so user can always do soft+hard
+
+        const { result, newHistory } = await engine.runTurn(currentPrompt, currentHistory)
+
+        // Update shared history with latest turn
+        history.length = 0
+        history.push(...newHistory.slice(-40))
+        currentHistory = [...history]
+
+        if (result.reason === 'interrupted') {
+          // ── Soft interrupt: ask user for guidance, then resume ──
+          renderer.writeInterruptPrompt()
+          const { text: feedback, eof } = await input.readLine('')
+
+          if (eof) {
+            // Ctrl+D during interrupt prompt = hard exit
+            break
+          }
+
+          const trimmedFeedback = feedback.trim()
+          if (trimmedFeedback) {
+            renderer.interruptInjected(trimmedFeedback)
+            currentPrompt = `[用户中途介入]\n${trimmedFeedback}\n\n请根据以上建议继续执行任务。`
+          } else {
+            // Empty Enter = resume silently
+            currentPrompt = '[继续] 请继续自主推进任务，无需等待进一步指示。'
+          }
+          // Continue the while loop → runTurn again with new message
+          continue
+        }
+
+        // Normal finish (stop / max_iterations / error)
+        const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
+        renderer.info(`Done in ${elapsed}s · ${result.reason}`)
+        break
+      }
+    } catch (err: unknown) {
+      const error = err as Error
+      if (error.name !== 'AbortError') {
+        renderer.error(`Error: ${error.message}`)
+      }
+    } finally {
+      running = false
+    }
+  }
 
   while (true) {
     renderer.writePrompt()
@@ -389,7 +455,7 @@ async function runRepl(
     const trimmed = text.trim()
     if (!trimmed) continue
 
-    // ── /plan command — needs full REPL context ──────────────
+    // ── /plan command ─────────────────────────────────────────
     if (trimmed.startsWith('/plan')) {
       const planTask = trimmed.slice(5).trim()
       if (!planTask) {
@@ -401,7 +467,7 @@ async function runRepl(
       continue
     }
 
-    // ── Other /commands ──────────────────────────────────────
+    // ── Other /commands ───────────────────────────────────────
     if (trimmed.startsWith('/')) {
       const result = await handleBuiltin(trimmed, history, engine, renderer, cwd, skills)
 
@@ -419,19 +485,7 @@ async function runRepl(
         renderer.humanPrompt(expandedPrompt.split('\n')[0] + (expandedPrompt.includes('\n') ? ' …' : ''))
         updateProgressLog(cwd, 'running', `/${skill.name}`)
 
-        running = true
-        const startMs = Date.now()
-        try {
-          const { result: r, newHistory } = await engine.runTurn(expandedPrompt, history)
-          history.length = 0
-          history.push(...newHistory.slice(-40))
-          const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
-          renderer.info(`Done in ${elapsed}s · ${r.reason}`)
-        } catch (err: unknown) {
-          renderer.error(`Error: ${(err as Error).message}`)
-        } finally {
-          running = false
-        }
+        await runTask(expandedPrompt, [...history], Date.now())
         updateProgressLog(cwd, 'idle', 'waiting for next task')
         continue
       }
@@ -441,32 +495,10 @@ async function runRepl(
 
     // ── Regular task ──────────────────────────────────────────
     renderer.humanPrompt(trimmed)
-
-    // UserPromptSubmit hook
     hookRunner.runUserPromptSubmit(trimmed)
-
     updateProgressLog(cwd, 'running', trimmed.slice(0, 100))
 
-    running = true
-    const startMs = Date.now()
-
-    try {
-      const { result, newHistory } = await engine.runTurn(trimmed, history)
-
-      history.length = 0
-      history.push(...newHistory.slice(-40))
-
-      const elapsed = ((Date.now() - startMs) / 1000).toFixed(1)
-      renderer.info(`Done in ${elapsed}s · ${result.reason}`)
-    } catch (err: unknown) {
-      const error = err as Error
-      if (error.name !== 'AbortError') {
-        renderer.error(`Error: ${error.message}`)
-      }
-    } finally {
-      running = false
-    }
-
+    await runTask(trimmed, [...history], Date.now())
     updateProgressLog(cwd, 'idle', 'waiting for next task')
   }
 

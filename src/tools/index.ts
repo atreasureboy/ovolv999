@@ -16,6 +16,8 @@ import { AgentTool } from './agent.js'
 import { FindingWriteTool, FindingListTool } from './finding.js'
 import { WeaponRadarTool } from './weaponRadar.js'
 import { MultiScanTool } from './multiScan.js'
+import { MultiAgentTool } from './multiAgent.js'
+import { ShellSessionTool } from './shellSession.js'
 
 export function createTools(extraTools: Tool[] = []): Tool[] {
   return [
@@ -29,6 +31,8 @@ export function createTools(extraTools: Tool[] = []): Tool[] {
     new WebFetchTool(),
     new WebSearchTool(),
     new AgentTool(),
+    new MultiAgentTool(),
+    new ShellSessionTool(),
     new FindingWriteTool(),
     new FindingListTool(),
     new WeaponRadarTool(),
@@ -59,4 +63,6 @@ export {
   FindingListTool,
   WeaponRadarTool,
   MultiScanTool,
+  MultiAgentTool,
+  ShellSessionTool,
 }

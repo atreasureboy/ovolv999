@@ -14,6 +14,10 @@
  * 3. Plan mode — only read-only tools are exposed/executed.
  *
  * 4. Hook callbacks around every tool call.
+ *
+ * 5. Critic loop — every CRITIC_INTERVAL iterations a lightweight LLM call
+ *    reviews recent context for common failure modes and injects corrections
+ *    as a user message before the next main LLM call.
  */
 
 import OpenAI from 'openai'
@@ -31,6 +35,71 @@ import type { Renderer } from '../ui/renderer.js'
 import { maybeCompact, estimateTokens, COMPACT_THRESHOLD_TOKENS } from './compact.js'
 
 const MAX_TOOL_RESULT_LENGTH = 20_000
+
+// ── Critic configuration ─────────────────────────────────────────────────────
+/** Run critic every N iterations (only when there are enough messages to review) */
+const CRITIC_INTERVAL = 5
+/** Don't bother before this many iterations */
+const CRITIC_MIN_ITERATIONS = 4
+/** How many recent messages to feed the critic */
+const CRITIC_CONTEXT_MESSAGES = 24
+/** Max tokens the critic can produce */
+const CRITIC_MAX_TOKENS = 400
+
+const CRITIC_SYSTEM_PROMPT = `你是一个渗透测试会话的批判性监督 agent。
+你只阅读操作历史，不执行操作。你的职责是发现以下常见失误并给出简短纠正：
+
+1. **PoC 未执行** — WeaponRadar 返回了 poc_code，但随后没有把 PoC 写入文件并用 nuclei 执行
+2. **工具降级** — 遇到 "command not found" / 模板找不到 / 工具缺失，直接改用手动 curl/wget 测试，而非先安装工具
+3. **重要发现被遗忘** — 之前扫描/发现的端口、服务版本、凭证、漏洞没有被后续步骤跟进利用
+4. **任务偏离** — 偏离了最初的目标，陷入无关或低价值操作
+5. **重复劳动** — 正在重复已经完成过的操作（相同命令、相同扫描）
+6. **交互式进程阻塞** — 使用 msfconsole / nc shell / python REPL 等交互式进程但未用 run_in_background，或 msfconsole 未用资源文件+run -z，导致 Bash 调用超时
+
+输出规则：
+- 发现问题：用 "⚠️ [问题] {描述}" + "↳ [纠正] {具体应执行什么}" 格式，最多 3 条
+- 没有问题：只输出 "OK"
+- 不解释你的角色，不废话，直接结论`
+
+function formatMessagesForCritic(messages: OpenAIMessage[]): string {
+  return messages
+    .map((m) => {
+      if (m.role === 'assistant') {
+        const toolCalls = (m as { tool_calls?: Array<{ function: { name: string; arguments: string } }> }).tool_calls
+        if (toolCalls && toolCalls.length > 0) {
+          const calls = toolCalls
+            .map((tc) => {
+              let args: Record<string, unknown>
+              try { args = JSON.parse(tc.function.arguments) } catch { args = {} }
+              // Truncate large fields (e.g. poc_code in WeaponRadar results)
+              const truncated = Object.fromEntries(
+                Object.entries(args).map(([k, v]) => [
+                  k,
+                  typeof v === 'string' && v.length > 300 ? v.slice(0, 300) + '…' : v,
+                ]),
+              )
+              return `  [TOOL_CALL] ${tc.function.name}(${JSON.stringify(truncated)})`
+            })
+            .join('\n')
+          const text = typeof m.content === 'string' && m.content ? `  ${m.content}\n` : ''
+          return `[ASSISTANT]\n${text}${calls}`
+        }
+        return `[ASSISTANT] ${m.content ?? ''}`
+      }
+      if (m.role === 'tool') {
+        const content = typeof m.content === 'string' ? m.content.slice(0, 800) : ''
+        const name = (m as { name?: string }).name ?? 'tool'
+        return `[TOOL_RESULT:${name}] ${content}${content.length >= 800 ? '…' : ''}`
+      }
+      if (m.role === 'user') {
+        const content = typeof m.content === 'string' ? m.content.slice(0, 400) : ''
+        return `[USER] ${content}`
+      }
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n')
+}
 
 function truncateToolResult(result: string): string {
   if (result.length <= MAX_TOOL_RESULT_LENGTH) return result
@@ -81,8 +150,9 @@ const PLAN_MODE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'
 const CONCURRENCY_SAFE_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch',
   'WeaponRadar', 'FindingList', 'MultiScan',
-  'Bash',    // parallel — dependent ops should be chained with && in one call
-  'Agent',   // parallel — multiple sub-agents run simultaneously via Promise.all
+  'Bash',        // parallel — dependent ops should be chained with && in one call
+  'Agent',       // parallel — multiple sub-agents run simultaneously via Promise.all
+  'MultiAgent',  // parallel — internally uses Promise.all; safe to batch with others
 ])
 
 /**
@@ -114,6 +184,8 @@ export class ExecutionEngine {
   private renderer: Renderer
   /** Abort controller for the current turn — null when idle */
   private currentTurnAbortController: AbortController | null = null
+  /** Soft-interrupt flag: pause after current tool finishes, preserve history */
+  private softAbortRequested = false
 
   constructor(config: EngineConfig, renderer: Renderer) {
     this.config = config
@@ -126,11 +198,52 @@ export class ExecutionEngine {
   }
 
   /**
-   * Cancel the currently running turn.
-   * Propagates to all in-flight tool executions via ToolContext.signal.
+   * Hard cancel — immediately aborts in-flight API calls and tool executions.
+   * Propagates via AbortSignal into Bash (kills process group) and WebFetch.
    */
   abort(): void {
     this.currentTurnAbortController?.abort('user_cancelled')
+  }
+
+  /**
+   * Soft interrupt — sets a flag the main loop checks at the START of each
+   * iteration (after current tool finishes).  Causes runTurn() to return
+   * with reason='interrupted' while preserving the full conversation history,
+   * allowing the caller to inject a user message and resume.
+   */
+  softAbort(): void {
+    this.softAbortRequested = true
+  }
+
+  /**
+   * Run a lightweight critic check over recent conversation history.
+   * Returns a correction string to inject, or null if everything looks fine.
+   * Errors are swallowed — critic failures must never break the main loop.
+   */
+  private async runCriticCheck(messages: OpenAIMessage[]): Promise<string | null> {
+    const recent = messages.slice(-CRITIC_CONTEXT_MESSAGES)
+    if (recent.length < 4) return null
+
+    try {
+      const response = await this.client.chat.completions.create({
+        model: this.config.model,
+        messages: [
+          { role: 'system', content: CRITIC_SYSTEM_PROMPT },
+          {
+            role: 'user',
+            content: `以下是最近的操作历史，请检查是否存在失误：\n\n${formatMessagesForCritic(recent)}`,
+          },
+        ],
+        temperature: 0,
+        max_tokens: CRITIC_MAX_TOKENS,
+      })
+
+      const output = response.choices[0]?.message?.content?.trim() ?? ''
+      if (!output || /^ok$/i.test(output)) return null
+      return output
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -185,6 +298,15 @@ export class ExecutionEngine {
 
         iterations++
 
+        // ── Soft-interrupt check — pause after current tool, preserve history ─
+        if (this.softAbortRequested) {
+          this.softAbortRequested = false
+          return {
+            result: { stopped: true, reason: 'interrupted', output: finalOutput },
+            newHistory: messages,
+          }
+        }
+
         // ── Auto-compact when context grows too large ────────────
         const estimatedTokens = estimateTokens(messages)
         if (estimatedTokens > COMPACT_THRESHOLD_TOKENS) {
@@ -194,6 +316,25 @@ export class ExecutionEngine {
             messages.length = 0
             messages.push(...compactResult.messages)
             this.renderer.compactDone(compactResult.originalTokens, compactResult.summaryTokens)
+          }
+        }
+
+        // ── Critic injection — every CRITIC_INTERVAL iterations ──
+        // Only for the main agent (not sub-agents) to avoid recursive critic calls.
+        // Sub-agents have shorter maxIterations and no sessionDir typically.
+        if (
+          iterations >= CRITIC_MIN_ITERATIONS &&
+          iterations % CRITIC_INTERVAL === 0 &&
+          !planMode &&
+          this.config.sessionDir  // only main agent has sessionDir
+        ) {
+          const criticism = await this.runCriticCheck(messages)
+          if (criticism) {
+            this.renderer.warn(`[批判检查] ${criticism.split('\n')[0]}`)
+            messages.push({
+              role: 'user',
+              content: `[🔍 自动纠错检查]\n${criticism}\n\n请根据以上纠错提示立即调整行动。`,
+            })
           }
         }
 

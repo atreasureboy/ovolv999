@@ -48,8 +48,74 @@ export function registerAgentFactory(
   _currentRenderer = renderer
 }
 
+/**
+ * Shared runner used by both AgentTool and MultiAgentTool.
+ * Returns a ToolResult with prefixed agent type.
+ */
+export async function runAgentTask(
+  description: string,
+  prompt: string,
+  agentType: AgentType,
+  maxIterations: number,
+  context: ToolContext,
+): Promise<ToolResult> {
+  if (!_engineFactory || !_currentConfig || !_currentRenderer) {
+    return { content: 'Error: AgentTool 未初始化', isError: true }
+  }
+
+  const renderer = _currentRenderer as {
+    agentStart: (desc: string, type: string) => void
+    agentDone:  (desc: string, success: boolean) => void
+  }
+  renderer.agentStart(description, agentType)
+
+  let systemPrompt: string
+  if (RED_TEAM_TYPES.has(agentType)) {
+    const basePrompt = getRedTeamAgentPrompt(agentType as RedTeamAgentType, context.cwd)
+    const sessionDir = _currentConfig.sessionDir
+    systemPrompt = sessionDir ? basePrompt + `\n\n当前 Session 目录: ${sessionDir}` : basePrompt
+  } else {
+    systemPrompt = getAgentTypeSystemPrompt(agentType as LegacyAgentType, context.cwd)
+  }
+
+  const childConfig: EngineConfig = {
+    ..._currentConfig,
+    maxIterations,
+    cwd: context.cwd,
+    hookRunner: undefined,
+    planMode: READ_ONLY_TYPES.has(agentType),
+    systemPrompt,
+    // Sub-agents have no sessionDir so critic loop won't trigger in them
+    sessionDir: undefined,
+  }
+
+  const childEngine = _engineFactory(childConfig, _currentRenderer)
+
+  try {
+    const { result } = await childEngine.runTurn(prompt, [])
+    renderer.agentDone(description, result.reason !== 'error')
+
+    if (!result.output) {
+      return {
+        content: `[${agentType}] "${description}" 完成（${result.reason}），无文本输出。`,
+        isError: false,
+      }
+    }
+    return {
+      content: `[${agentType}] "${description}":\n\n${result.output}`,
+      isError: false,
+    }
+  } catch (err: unknown) {
+    renderer.agentDone(description, false)
+    return {
+      content: `[${agentType}] "${description}" 异常: ${(err as Error).message}`,
+      isError: true,
+    }
+  }
+}
+
 // Default max_iterations per agent type (agents are focused, need enough room)
-const DEFAULT_ITERATIONS: Record<string, number> = {
+export const DEFAULT_ITERATIONS: Record<string, number> = {
   // 侦察
   'dns-recon':       80,
   'port-scan':       80,
@@ -169,11 +235,11 @@ Sub-agent 没有父对话的上下文，所有信息必须在 prompt 中提供�
   }
 
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const description    = String(input.description ?? 'subtask')
-    const prompt         = String(input.prompt ?? '')
-    const agentType      = String(input.subagent_type ?? 'general-purpose') as AgentType
-    const defaultIter    = DEFAULT_ITERATIONS[agentType] ?? 30
-    const maxIterations  = typeof input.max_iterations === 'number'
+    const description   = String(input.description ?? 'subtask')
+    const prompt        = String(input.prompt ?? '')
+    const agentType     = String(input.subagent_type ?? 'general-purpose') as AgentType
+    const defaultIter   = DEFAULT_ITERATIONS[agentType] ?? 30
+    const maxIterations = typeof input.max_iterations === 'number'
       ? Math.min(input.max_iterations, 200)
       : defaultIter
 
@@ -181,81 +247,10 @@ Sub-agent 没有父对话的上下文，所有信息必须在 prompt 中提供�
       return { content: 'Error: prompt 不能为空', isError: true }
     }
 
-    const allValidTypes: AgentType[] = [
-      'dns-recon', 'port-scan', 'web-probe',
-      'weapon-match', 'osint',
-      'web-vuln', 'service-vuln', 'auth-attack', 'poc-verify',
-      'exploit', 'webshell',
-      'post-exploit', 'privesc', 'c2-deploy',
-      'tunnel', 'internal-recon', 'lateral',
-      'report',
-      'general-purpose', 'explore', 'plan', 'code-reviewer',
-    ]
-    if (!allValidTypes.includes(agentType)) {
-      return {
-        content: `Error: 未知 subagent_type "${agentType}"。可用类型：${allValidTypes.join(', ')}`,
-        isError: true,
-      }
-    }
-
     if (!_engineFactory || !_currentConfig || !_currentRenderer) {
-      return {
-        content: 'Error: AgentTool 未初始化，请先调用 registerAgentFactory。',
-        isError: true,
-      }
+      return { content: 'Error: AgentTool 未初始化，请先调用 registerAgentFactory。', isError: true }
     }
 
-    const renderer = _currentRenderer as {
-      agentStart: (desc: string, type: string) => void
-      agentDone:  (desc: string, success: boolean) => void
-    }
-    renderer.agentStart(description, agentType)
-
-    // Build specialized system prompt
-    let systemPrompt: string
-    if (RED_TEAM_TYPES.has(agentType)) {
-      const basePrompt = getRedTeamAgentPrompt(agentType as RedTeamAgentType, context.cwd)
-      // Inject session dir from config if available
-      const sessionDir = _currentConfig.sessionDir
-      systemPrompt = sessionDir
-        ? basePrompt + `\n\n当前 Session 目录: ${sessionDir}`
-        : basePrompt
-    } else {
-      systemPrompt = getAgentTypeSystemPrompt(agentType as LegacyAgentType, context.cwd)
-    }
-
-    const childConfig: EngineConfig = {
-      ..._currentConfig,
-      maxIterations,
-      cwd: context.cwd,
-      hookRunner: undefined,
-      planMode: READ_ONLY_TYPES.has(agentType),
-      systemPrompt,
-    }
-
-    const childEngine = _engineFactory(childConfig, _currentRenderer)
-
-    try {
-      const { result } = await childEngine.runTurn(prompt, [])
-      renderer.agentDone(description, result.reason !== 'error')
-
-      if (!result.output) {
-        return {
-          content: `[${agentType}] "${description}" 完成（${result.reason}），无文本输出。`,
-          isError: false,
-        }
-      }
-
-      return {
-        content: `[${agentType}] "${description}":\n\n${result.output}`,
-        isError: false,
-      }
-    } catch (err: unknown) {
-      renderer.agentDone(description, false)
-      return {
-        content: `[${agentType}] "${description}" 异常: ${(err as Error).message}`,
-        isError: true,
-      }
-    }
+    return runAgentTask(description, prompt, agentType, maxIterations, context)
   }
 }
