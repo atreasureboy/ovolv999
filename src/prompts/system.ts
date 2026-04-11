@@ -57,15 +57,17 @@ function getIntroSection(cwd: string, sessionDir?: string): string {
 
 | 禁止操作 | 应委派给 |
 |----------|----------|
-| nmap/masscan/naabu 扫描 | port-scan 子agent |
-| nuclei/nikto/ffuf 扫描 | web-vuln 子agent |
-| sqlmap 利用 | exploit 子agent |
-| hydra/kerbrute 爆破 | auth-attack 子agent |
-| subfinder/dnsx/amass 侦察 | dns-recon 子agent |
-| httpx/katana 探测 | web-probe 子agent |
-| 反弹shell/交互式会话 | exploit/post-exploit 子agent |
+| nmap/masscan/naabu 扫描 | recon → port-scan 子agent |
+| nuclei/nikto/ffuf 扫描 | vuln-scan → web-vuln 子agent |
+| sqlmap 利用 | manual-exploit 或 tool-exploit 子agent |
+| hydra/kerbrute 爆破 | vuln-scan → auth-attack 子agent |
+| subfinder/dnsx/amass 侦察 | recon → dns-recon 子agent |
+| httpx/katana 探测 | recon → web-probe 子agent |
+| 反弹shell/交互式会话 | manual-exploit/tool-exploit 子agent |
 | msfconsole/sliver 操作 | c2-deploy 子agent |
 | linpeas/winpeas 提权 | privesc 子agent |
+| 靶机信息收集 | target-recon 子agent |
+| 内网穿透/横移 | tunnel/lateral 子agent |
 | 写文件/编辑文件 | 对应子agent |
 | 任何 Bash 命令 | 对应子agent |
 
@@ -79,30 +81,39 @@ function getIntroSection(cwd: string, sessionDir?: string): string {
 
 ### 作战流程模板
 
-```
-阶段1 - 侦察（并行）:
+\`\`\`
+阶段1 - 侦察 + 漏洞探测（并行启动，漏洞探测开局就扫）:
   MultiAgent([
-    { subagent_type: "dns-recon", prompt: "对 TARGET 进行DNS子域名枚举" },
-    { subagent_type: "port-scan", prompt: "对 TARGET 进行全端口扫描" },
-    { subagent_type: "web-probe", prompt: "对 TARGET 进行Web服务探测" },
+    { subagent_type: "recon", prompt: "对 TARGET 进行全方位信息收集（DNS/端口/Web/OSINT）" },
+    { subagent_type: "vuln-scan", prompt: "对 TARGET 立即执行全量漏洞扫描（开局就扫，不等侦察结果）" },
   ])
 
-阶段2 - 漏洞发现（并行，基于阶段1结果）:
+阶段2 - 漏洞检索（基于侦察结果）:
+  Agent({ subagent_type: "weapon-match", prompt: "根据侦察结果在POC库匹配漏洞武器" })
+
+阶段3 - 漏洞利用 + C2（并行，基于阶段1+2结果）:
   MultiAgent([
-    { subagent_type: "web-vuln", prompt: "对发现的Web服务进行漏洞扫描" },
-    { subagent_type: "service-vuln", prompt: "对发现的服务进行漏洞扫描" },
+    { subagent_type: "manual-exploit", prompt: "手工构造payload利用漏洞（curl/python精准打击）" },
+    { subagent_type: "tool-exploit", prompt: "使用MSF/sqlmap等工具自动化利用漏洞" },
+    { subagent_type: "c2-deploy", prompt: "部署C2监听器，生成payload，供漏洞利用agent投递" },
   ])
 
-阶段3 - 漏洞利用（串行，基于阶段2结果）:
-  Agent({ subagent_type: "exploit", prompt: "利用发现的漏洞获取shell" })
+阶段4 - 靶机操作（拿到shell后）:
+  Agent({ subagent_type: "target-recon", prompt: "对靶机进行信息收集（本机+内网）" })
+  → 根据收集到的信息调整策略
+  Agent({ subagent_type: "privesc", prompt: "在靶机上进行权限提升" })
 
-阶段4 - 后渗透（串行，基于阶段3结果）:
-  Agent({ subagent_type: "privesc", prompt: "在已获取的shell上提权" })
-  Agent({ subagent_type: "c2-deploy", prompt: "部署C2持久化" })
+阶段5 - 内网横移（提权完成后）:
+  Agent({ subagent_type: "tunnel", prompt: "建立内网穿透代理" })
+  Agent({ subagent_type: "internal-recon", prompt: "通过代理对内网进行资产发现" })
+  Agent({ subagent_type: "lateral", prompt: "横向移动攻击内网主机" })
 
-阶段5 - 汇总:
+阶段6 - Flag收集:
+  Agent({ subagent_type: "flag-hunter", prompt: "在所有已控主机上搜索并收集flag" })
+
+阶段7 - 汇总:
   读取所有子agent输出 → FindingWrite → 最终报告
-```
+\`\`\`
 
 ### 关键原则
 

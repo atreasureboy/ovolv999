@@ -728,26 +728,26 @@ export class ExecutionEngine {
     const TOOL_TO_AGENT: Record<string, { type: string; reason: string }> = {
       'Bash': {
         type: '根据命令内容选择子agent类型',
-        reason: 'Bash命令是子agent的工作。扫描用port-scan/web-vuln，利用用exploit，后渗透用post-exploit',
+        reason: 'Bash命令是子agent的工作。扫描用recon/vuln-scan，利用用manual-exploit/tool-exploit，靶机用target-recon',
       },
       'MultiScan': {
-        type: 'port-scan / web-vuln / service-vuln',
-        reason: 'MultiScan只是并行Bash，没有LLM推理。用MultiAgent启动专用子agent',
+        type: 'vuln-scan → web-vuln / service-vuln',
+        reason: 'MultiScan只是并行Bash，没有LLM推理。用MultiAgent启动vuln-scan子agent',
       },
       'ShellSession': {
-        type: 'exploit / post-exploit / privesc',
+        type: 'manual-exploit / target-recon / privesc',
         reason: '反弹shell交互是子agent的工作',
       },
       'TmuxSession': {
-        type: 'exploit / c2-deploy',
+        type: 'tool-exploit / c2-deploy',
         reason: 'msfconsole/sliver交互是子agent的工作',
       },
       'Write': {
-        type: 'exploit / webshell / report',
+        type: 'manual-exploit / report',
         reason: '文件写入是子agent的工作',
       },
       'Edit': {
-        type: 'exploit / webshell',
+        type: 'manual-exploit',
         reason: '文件编辑是子agent的工作',
       },
     }
@@ -757,34 +757,35 @@ export class ExecutionEngine {
       return `请通过 Agent 或 MultiAgent 委派子agent执行。`
     }
 
-    // Special handling for Bash — try to detect what kind of command
     if (toolName === 'Bash') {
       const cmd = String(input.command ?? '').toLowerCase()
       if (cmd.includes('nmap') || cmd.includes('masscan') || cmd.includes('naabu')) {
-        return `请用 MultiAgent 启动 port-scan 子agent:\n  MultiAgent({ agents: [{ subagent_type: "port-scan", description: "端口扫描", prompt: "..." }] })`
+        return `请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "侦察", prompt: "对 TARGET 进行端口扫描" }] })`
       }
       if (cmd.includes('nuclei') || cmd.includes('nikto') || cmd.includes('ffuf')) {
-        return `请用 MultiAgent 启动 web-vuln 子agent:\n  MultiAgent({ agents: [{ subagent_type: "web-vuln", description: "Web漏洞扫描", prompt: "..." }] })`
+        return `请用 MultiAgent 启动 vuln-scan 子agent:\n  MultiAgent({ agents: [{ subagent_type: "vuln-scan", description: "漏洞扫描", prompt: "对 TARGET 进行漏洞扫描" }] })`
       }
       if (cmd.includes('sqlmap')) {
-        return `请用 Agent 启动 exploit 子agent:\n  Agent({ subagent_type: "exploit", description: "SQL注入利用", prompt: "..." })`
+        return `请用 MultiAgent 启动 manual-exploit 和 tool-exploit 子agent:\n  MultiAgent({ agents: [{ subagent_type: "manual-exploit", ... }, { subagent_type: "tool-exploit", ... }] })`
       }
       if (cmd.includes('hydra') || cmd.includes('kerbrute')) {
-        return `请用 Agent 启动 auth-attack 子agent:\n  Agent({ subagent_type: "auth-attack", description: "认证攻击", prompt: "..." })`
+        return `请用 MultiAgent 启动 vuln-scan 子agent:\n  MultiAgent({ agents: [{ subagent_type: "vuln-scan", description: "认证攻击", prompt: "对 TARGET 进行弱口令测试" }] })`
       }
       if (cmd.includes('subfinder') || cmd.includes('dnsx') || cmd.includes('amass')) {
-        return `请用 MultiAgent 启动 dns-recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "dns-recon", description: "DNS侦察", prompt: "..." }] })`
+        return `请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "DNS侦察", prompt: "对 TARGET 进行DNS子域名枚举" }] })`
       }
       if (cmd.includes('httpx') || cmd.includes('katana')) {
-        return `请用 MultiAgent 启动 web-probe 子agent:\n  MultiAgent({ agents: [{ subagent_type: "web-probe", description: "Web探测", prompt: "..." }] })`
+        return `请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "Web探测", prompt: "对 TARGET 进行Web服务探测" }] })`
       }
       if (cmd.includes('chisel') || cmd.includes('stowaway') || cmd.includes('proxychains')) {
-        return `请用 Agent 启动 tunnel 子agent:\n  Agent({ subagent_type: "tunnel", description: "内网穿透", prompt: "..." })`
+        return `请用 Agent 启动 tunnel 子agent:\n  Agent({ subagent_type: "tunnel", description: "内网穿透", prompt: "建立内网穿透代理" })`
       }
       if (cmd.includes('linpeas') || cmd.includes('winpeas')) {
-        return `请用 Agent 启动 privesc 子agent:\n  Agent({ subagent_type: "privesc", description: "权限提升", prompt: "..." })`
+        return `请用 Agent 启动 privesc 子agent:\n  Agent({ subagent_type: "privesc", description: "权限提升", prompt: "在靶机上进行提权" })`
       }
-      // Reading sub-agent output files is allowed via Read tool
+      if (cmd.includes('find') && cmd.includes('flag')) {
+        return `请用 Agent 启动 flag-hunter 子agent:\n  Agent({ subagent_type: "flag-hunter", description: "Flag收集", prompt: "搜索并收集flag" })`
+      }
       if (cmd.includes('tail') || cmd.includes('cat') || cmd.includes('head')) {
         return `读取文件请用 Read 工具:\n  Read({ file_path: "SESSION_DIR/xxx.txt" })`
       }

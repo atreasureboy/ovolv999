@@ -21,16 +21,22 @@ type AgentType = RedTeamAgentType | LegacyAgentType
 const READ_ONLY_TYPES = new Set<AgentType>(['explore', 'plan', 'code-reviewer'])
 
 const RED_TEAM_TYPES = new Set<AgentType>([
-  // 侦察
-  'dns-recon', 'port-scan', 'web-probe', 'weapon-match', 'osint',
-  // 扫描
-  'web-vuln', 'service-vuln', 'auth-attack', 'poc-verify',
-  // 利用
-  'exploit', 'webshell',
-  // 后渗透
-  'post-exploit', 'privesc', 'c2-deploy',
-  // 横移
+  // 侦察（并行）
+  'recon', 'dns-recon', 'port-scan', 'web-probe', 'osint',
+  // 漏洞检索
+  'weapon-match',
+  // 漏洞探测（开局就扫）
+  'vuln-scan', 'web-vuln', 'service-vuln', 'auth-attack',
+  // 漏洞利用（手动+工具，两个并行）
+  'manual-exploit', 'tool-exploit',
+  // C2（与漏洞利用同时）
+  'c2-deploy',
+  // 靶机（信息收集+提权）
+  'target-recon', 'privesc',
+  // 内网横移
   'tunnel', 'internal-recon', 'lateral',
+  // Flag收集
+  'flag-hunter',
   // 综合
   'report',
 ])
@@ -137,30 +143,35 @@ export async function runAgentTask(
 
 // Default max_iterations per agent type (agents are focused, need enough room)
 export const DEFAULT_ITERATIONS: Record<string, number> = {
-  // 侦察
-  'dns-recon':       80,
-  'port-scan':       80,
-  'web-probe':       80,
-  'weapon-match':    60,
-  'osint':           60,
-  // 扫描
-  'web-vuln':       120,
-  'service-vuln':   100,
-  'auth-attack':    100,
-  'poc-verify':      60,
-  // 利用
-  'exploit':        100,   // 多轮尝试exploit + 验证shell
-  'webshell':        80,   // 上传+验证+命令执行
-  // 后渗透
-  'post-exploit':    80,   // 信息收集+敏感文件搜索
-  'privesc':        100,   // 检测+多种路径尝试
-  'c2-deploy':       80,   // beacon生成+上传+执行+等待上线
-  // 横移
-  'tunnel':          80,   // proxy建立+验证
-  'internal-recon': 100,   // 内网扫描（通过代理，较慢）
-  'lateral':        120,   // 多目标横向移动
+  // 侦察（并行）
+  'recon':            80,
+  'dns-recon':        80,
+  'port-scan':        80,
+  'web-probe':        80,
+  'osint':            60,
+  // 漏洞检索
+  'weapon-match':     60,
+  // 漏洞探测（开局就扫）
+  'vuln-scan':       120,
+  'web-vuln':        120,
+  'service-vuln':    100,
+  'auth-attack':     100,
+  // 漏洞利用（手动+工具，两个并行）
+  'manual-exploit':  100,
+  'tool-exploit':    100,
+  // C2（与漏洞利用同时）
+  'c2-deploy':        80,
+  // 靶机（信息收集+提权）
+  'target-recon':     80,
+  'privesc':         100,
+  // 内网横移
+  'tunnel':           80,
+  'internal-recon':  100,
+  'lateral':         120,
+  // Flag收集
+  'flag-hunter':      80,
   // 综合
-  'report':          60,
+  'report':           60,
   'general-purpose': 60,
   'explore':         40,
   'plan':            30,
