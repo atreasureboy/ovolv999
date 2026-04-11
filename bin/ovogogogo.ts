@@ -45,7 +45,7 @@ import { buildFullSystemPrompt } from '../src/prompts/system.js'
 import { PriorityQueue } from '../src/core/priorityQueue.js'
 import { ProgressTracker } from '../src/core/progressTracker.js'
 import { ToolCache } from '../src/core/toolCache.js'
-import { tmuxLayout } from '../src/ui/tmuxLayout.js'
+import { tmuxLayout, tryAutoLaunchInTmux } from '../src/ui/tmuxLayout.js'
 
 const VERSION = '0.1.0'
 
@@ -567,6 +567,13 @@ async function main(): Promise<void> {
         'Export it with: export OPENAI_API_KEY=sk-...\n',
     )
     process.exit(1)
+  }
+
+  // ── 自动四宫格：如果当前不在 tmux 里，自动新建 tmux session 并在里面运行 ──
+  // 这样用户无论从哪里启动 ovogogogo，都能看到四宫格 UI
+  if (tryAutoLaunchInTmux()) {
+    // 已经 attach 并运行完成，退出外层进程
+    process.exit(0)
   }
 
   const renderer = new Renderer()
