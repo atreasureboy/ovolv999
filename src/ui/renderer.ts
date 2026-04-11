@@ -486,6 +486,19 @@ export class Renderer {
     this.write(`${header}${body}\n`)
   }
 
+  /**
+   * Periodic heartbeat: show that a sub-agent is still running.
+   * Fires every 2 minutes so the user knows it hasn't hung silently.
+   */
+  agentHeartbeat(agentType: string, description: string, elapsedSec: number): void {
+    const mins = Math.floor(elapsedSec / 60)
+    const secs = elapsedSec % 60
+    const elapsed = mins > 0 ? `${mins}m${secs}s` : `${secs}s`
+    this.write(
+      `  ${STRIPE.agent}  ${FG.yellow}⏳${RESET} ${DIM}[${agentType}] ${description} — 运行中 ${elapsed}…${RESET}\n`
+    )
+  }
+
   /** Show plan mode banner before a plan run */
   planModeStart(): void {
     this.write(

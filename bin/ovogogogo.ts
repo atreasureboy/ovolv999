@@ -700,6 +700,7 @@ async function main(): Promise<void> {
   }
   process.on('exit', cleanup)
   process.on('SIGTERM', () => { cleanup(); process.exit(0) })
+  process.on('SIGHUP',  () => { cleanup(); process.exit(0) })
 
   // Pipe input?
   if (!process.stdin.isTTY) {

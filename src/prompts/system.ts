@@ -203,19 +203,55 @@ MultiAgent({
  - ❌ \`MultiScan({ tasks: [...nmap, ...nuclei...] })\`
  - ✅ \`MultiAgent([recon, vuln-scan])\`
 
-## Phase 1 完成后
+## Phase 1 完成后 — 进入监控循环
 
-综合子 agent 汇报的发现，立即启动 Phase 2：
- - 有高置信漏洞 → \`Agent(weapon-match)\` 检索 POC，然后 \`MultiAgent([manual-exploit, tool-exploit, c2-deploy])\`
- - 有 shell 入口 → \`MultiAgent([target-recon, privesc])\`
- - 有内网路由 → \`MultiAgent([tunnel, internal-recon, lateral])\`
+**子 agent 会快速返回（后台扫描已启动），但扫描本身还在运行。**
+你的职责变为：定期读取结果文件，监控进度，发现新情报立即行动。
+
+### 监控循环协议
+
+每隔 3-5 轮，执行一次进度检查：
+
+\`\`\`
+# 端口扫描进度
+Bash({ command: "grep -c 'open' SESSION_DIR/nmap_ports.txt 2>/dev/null || echo '扫描中...'" })
+Bash({ command: "tail -3 SESSION_DIR/nmap_top1000.txt 2>/dev/null" })
+
+# Web漏洞扫描进度
+Bash({ command: "wc -l SESSION_DIR/nuclei_*.txt 2>/dev/null" })
+Bash({ command: "grep -E 'critical|high|medium' SESSION_DIR/nuclei_*.txt 2>/dev/null | tail -10" })
+
+# 目录枚举进度
+Bash({ command: "wc -l SESSION_DIR/ffuf.json 2>/dev/null; tail -5 SESSION_DIR/ffuf.json 2>/dev/null" })
+
+# 子域名/凭证
+Bash({ command: "wc -l SESSION_DIR/subs.txt 2>/dev/null; cat SESSION_DIR/hydra_*.txt 2>/dev/null | grep -i 'host:'" })
+\`\`\`
+
+### 立即行动的触发条件
+
+发现以下任一情况，**不等其他扫描完成**，立即派遣对应 agent：
+ - nuclei/ffuf 发现 critical/high 漏洞 → 立即 Agent(weapon-match) + MultiAgent([manual-exploit, tool-exploit])
+ - nmap 完成，有新服务/端口 → Agent(weapon-match) 用新发现批量查 POC
+ - hydra/nuclei 发现有效凭证 → Agent(manual-exploit) 利用凭证
+ - 发现 admin/管理后台 → Agent(manual-exploit) 立即尝试登录和上传
+ - 所有扫描均完成 → 综合所有发现，进入 Phase 3
+
+### 判断扫描完成的方法
+\`\`\`
+# nmap 完成标志
+grep 'Nmap done' SESSION_DIR/nmap_ports.txt
+
+# nuclei 完成标志（进程消失）
+ps aux | grep nuclei | grep -v grep
+\`\`\`
 
 ## 主 agent 可以直接使用的工具（不经过子 agent）
  - **WeaponRadar** — 搜漏洞库（查到后把结果塞进子 agent 的 prompt）
  - **FindingWrite / FindingList** — 记录漏洞发现
  - **TodoWrite** — 管理阶段进度
  - **WebFetch / WebSearch** — 查 CVE 详情、公开 PoC
- - **Bash** — 仅限读取子 agent 写入的结果文件：\`tail SESSION_DIR/xxx.txt\``
+ - **Bash** — 仅限读取子 agent 写入的结果文件`
 }
 
 function getToolUsageSection(): string {

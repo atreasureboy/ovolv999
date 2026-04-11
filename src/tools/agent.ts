@@ -81,11 +81,13 @@ export async function runAgentTask(
 
   // Main renderer: shows high-level agentStart/Done markers + brief summaries on main pane
   const mainRenderer = _currentRenderer as {
-    agentStart:   (desc: string, type: string) => void
-    agentDone:    (desc: string, success: boolean) => void
-    agentSummary: (agentType: string, desc: string, summary: string) => void
+    agentStart:     (desc: string, type: string) => void
+    agentDone:      (desc: string, success: boolean) => void
+    agentSummary:   (agentType: string, desc: string, summary: string) => void
+    agentHeartbeat: (agentType: string, desc: string, elapsedSec: number) => void
   }
   mainRenderer.agentStart(description, agentType)
+  const agentStartTime = Date.now()
 
   // Attempt to acquire a tmux pane slot for detailed output
   const agentLabel = `[${agentType}] ${description}`
@@ -130,10 +132,21 @@ export async function runAgentTask(
     context.signal.addEventListener('abort', () => childEngine.abort(), { once: true })
   }
 
+  // Heartbeat: every 2 minutes, report elapsed time in main terminal.
+  // Sub-agents are expected to start background scans and return quickly.
+  // If a heartbeat fires, the agent is still doing foreground work (LLM reasoning,
+  // WeaponRadar lookups, etc.) — not necessarily hung.
+  const HEARTBEAT_MS = 2 * 60 * 1000
+  const heartbeatTimer = setInterval(() => {
+    const elapsedSec = Math.round((Date.now() - agentStartTime) / 1000)
+    mainRenderer.agentHeartbeat(agentType, description, elapsedSec)
+  }, HEARTBEAT_MS)
+
   try {
     const { result } = await childEngine.runTurn(prompt, [])
-    mainRenderer.agentDone(description, result.reason !== 'error')
+    clearInterval(heartbeatTimer)
 
+    mainRenderer.agentDone(description, result.reason !== 'error')
     if (paneSlot) tmuxLayout.releaseSlot(paneSlot.slot)
 
     if (!result.output) {
@@ -159,6 +172,7 @@ export async function runAgentTask(
       isError: false,
     }
   } catch (err: unknown) {
+    clearInterval(heartbeatTimer)
     mainRenderer.agentDone(description, false)
     if (paneSlot) tmuxLayout.releaseSlot(paneSlot.slot)
     return {

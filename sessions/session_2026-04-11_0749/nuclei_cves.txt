@@ -1,0 +1,1 @@
+[CVE-2024-2473] [http] [medium] https://zhhovo.top/wp-admin/?action=postpass

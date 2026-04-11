@@ -68,6 +68,16 @@ export class TmuxLayout {
     const check = spawnSync('tmux', ['-V'], { stdio: 'pipe' })
     if (check.status !== 0) return false
 
+    // 清理上次残留的 ovogo-* sessions（Ctrl+Z 等情况下无法正常 cleanup）
+    try {
+      const out = execSync('tmux ls -F "#{session_name}"', { stdio: 'pipe' }).toString()
+      for (const name of out.trim().split('\n')) {
+        if (name.startsWith('ovogo-')) {
+          try { execSync(`tmux kill-session -t ${sq(name)}`, { stdio: 'pipe' }) } catch { /* ok */ }
+        }
+      }
+    } catch { /* no existing sessions */ }
+
     try {
       mkdirSync(logDir, { recursive: true })
     } catch {
