@@ -103,6 +103,8 @@ export async function runAgentTask(
     systemPrompt,
     // Sub-agents have no sessionDir so critic loop won't trigger in them
     sessionDir: undefined,
+    // Sub-agents are executors, not coordinators — give them full tool access
+    coordinatorMode: false,
   }
 
   const childEngine = _engineFactory(childConfig, childRenderer)

@@ -670,6 +670,7 @@ async function main(): Promise<void> {
     priorityQueue,
     progressTracker,
     toolCache,
+    coordinatorMode: true,
   }
 
   // Plan-mode config: same system prompt + planMode=true (engine filters write tools)

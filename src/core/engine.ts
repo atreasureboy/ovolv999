@@ -66,6 +66,7 @@ const CRITIC_SYSTEM_PROMPT = `你是一个渗透测试会话的批判性监督 a
 12. **发现漏洞不利用** — 确认漏洞存在（RCE/SQLi/文件上传）后只是 FindingWrite 就停止，没有继续利用执行命令、上传 webshell、读取 flag；靶场任务要求拿到 flag，不是写报告
 13. **没有找 flag** — 已经拿到命令执行权限（RCE/shell/webshell），但没有执行 find / -name flag* 或 cat /flag 等命令去寻找 flag 内容
 14. **主动杀掉后台扫描** — 执行了 killall nuclei / killall nmap / kill -9 <pid> 等命令强制终止了正在运行的后台扫描进程（nuclei/nmap/hydra/ffuf/masscan），随后重新启动扫描或继续任务；应当让原有扫描进程跑完并读取其结果，而不是杀掉重来；这一行为等同于自毁进度
+15. **主agent亲自执行** — 主agent直接调用Bash/MultiScan/ShellSession/TmuxSession/Write/Edit等执行类工具，而不是通过Agent/MultiAgent委派子agent；主agent是协调者，必须委派子agent执行所有具体操作
 
 输出规则：
 - 发现问题：用 "⚠️ [问题] {描述}" + "↳ [纠正] {具体应执行什么}" 格式，最多 3 条
@@ -144,6 +145,27 @@ interface ToolBatch {
 
 /** Plan mode — tools allowed in read-only analysis */
 const PLAN_MODE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'])
+
+/**
+ * Coordinator mode — tools the main agent is allowed to use directly.
+ * Everything else must be delegated to sub-agents via Agent/MultiAgent.
+ *
+ * Rationale: the main agent should be an orchestrator, not an executor.
+ * Scanning, exploitation, and post-exploitation are sub-agent work.
+ * The main agent reads results, makes decisions, and dispatches tasks.
+ */
+const COORDINATOR_ALLOWED_TOOLS = new Set([
+  // Delegation (core orchestrator tools)
+  'Agent', 'MultiAgent',
+  // Intelligence / lookup (fast, no side effects)
+  'WeaponRadar', 'WebSearch', 'WebFetch',
+  // Reading sub-agent outputs
+  'Read', 'Glob', 'Grep',
+  // Progress tracking
+  'FindingWrite', 'FindingList', 'TodoWrite',
+  // C2 coordination (get_ip, list_sessions, list_listeners — read-only actions)
+  'C2',
+])
 
 /**
  * Concurrency-safe tools: run in parallel within a single LLM response.
@@ -314,10 +336,15 @@ export class ExecutionEngine {
     ]
 
     // In plan mode, only expose read-only tools
+    // In coordinator mode, only expose orchestrator tools
     const allToolDefs = getToolDefinitions(this.tools)
-    const toolDefs = planMode
-      ? allToolDefs.filter((t) => PLAN_MODE_TOOLS.has(t.function.name))
-      : allToolDefs
+    const coordinatorMode = (this.config.coordinatorMode ?? false) && !!this.config.sessionDir
+    let toolDefs = allToolDefs
+    if (planMode) {
+      toolDefs = allToolDefs.filter((t) => PLAN_MODE_TOOLS.has(t.function.name))
+    } else if (coordinatorMode) {
+      toolDefs = allToolDefs.filter((t) => COORDINATOR_ALLOWED_TOOLS.has(t.function.name))
+    }
 
     let iterations = 0
     let finalOutput = ''
@@ -609,6 +636,16 @@ export class ExecutionEngine {
       }
     }
 
+    // In coordinator mode, block execution tools (defence in depth — tool defs already filtered)
+    const coordinatorMode = (this.config.coordinatorMode ?? false) && !!this.config.sessionDir
+    if (coordinatorMode && !COORDINATOR_ALLOWED_TOOLS.has(toolName)) {
+      const agentSuggestion = this.getCoordinatorSuggestion(toolName, input)
+      return {
+        content: `⛔ 协调者模式：主 agent 不能直接使用 ${toolName}。${agentSuggestion}`,
+        isError: true,
+      }
+    }
+
     // Check cache first (skip for non-cacheable tools)
     if (!NO_CACHE_TOOLS.has(toolName)) {
       const cachedResult = this.toolCache.get(toolName, input)
@@ -682,5 +719,77 @@ export class ExecutionEngine {
 
   getModel(): string {
     return this.config.model
+  }
+
+  /**
+   * When coordinator mode blocks a tool, suggest the correct sub-agent delegation.
+   */
+  private getCoordinatorSuggestion(toolName: string, input: Record<string, unknown>): string {
+    const TOOL_TO_AGENT: Record<string, { type: string; reason: string }> = {
+      'Bash': {
+        type: '根据命令内容选择子agent类型',
+        reason: 'Bash命令是子agent的工作。扫描用port-scan/web-vuln，利用用exploit，后渗透用post-exploit',
+      },
+      'MultiScan': {
+        type: 'port-scan / web-vuln / service-vuln',
+        reason: 'MultiScan只是并行Bash，没有LLM推理。用MultiAgent启动专用子agent',
+      },
+      'ShellSession': {
+        type: 'exploit / post-exploit / privesc',
+        reason: '反弹shell交互是子agent的工作',
+      },
+      'TmuxSession': {
+        type: 'exploit / c2-deploy',
+        reason: 'msfconsole/sliver交互是子agent的工作',
+      },
+      'Write': {
+        type: 'exploit / webshell / report',
+        reason: '文件写入是子agent的工作',
+      },
+      'Edit': {
+        type: 'exploit / webshell',
+        reason: '文件编辑是子agent的工作',
+      },
+    }
+
+    const suggestion = TOOL_TO_AGENT[toolName]
+    if (!suggestion) {
+      return `请通过 Agent 或 MultiAgent 委派子agent执行。`
+    }
+
+    // Special handling for Bash — try to detect what kind of command
+    if (toolName === 'Bash') {
+      const cmd = String(input.command ?? '').toLowerCase()
+      if (cmd.includes('nmap') || cmd.includes('masscan') || cmd.includes('naabu')) {
+        return `请用 MultiAgent 启动 port-scan 子agent:\n  MultiAgent({ agents: [{ subagent_type: "port-scan", description: "端口扫描", prompt: "..." }] })`
+      }
+      if (cmd.includes('nuclei') || cmd.includes('nikto') || cmd.includes('ffuf')) {
+        return `请用 MultiAgent 启动 web-vuln 子agent:\n  MultiAgent({ agents: [{ subagent_type: "web-vuln", description: "Web漏洞扫描", prompt: "..." }] })`
+      }
+      if (cmd.includes('sqlmap')) {
+        return `请用 Agent 启动 exploit 子agent:\n  Agent({ subagent_type: "exploit", description: "SQL注入利用", prompt: "..." })`
+      }
+      if (cmd.includes('hydra') || cmd.includes('kerbrute')) {
+        return `请用 Agent 启动 auth-attack 子agent:\n  Agent({ subagent_type: "auth-attack", description: "认证攻击", prompt: "..." })`
+      }
+      if (cmd.includes('subfinder') || cmd.includes('dnsx') || cmd.includes('amass')) {
+        return `请用 MultiAgent 启动 dns-recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "dns-recon", description: "DNS侦察", prompt: "..." }] })`
+      }
+      if (cmd.includes('httpx') || cmd.includes('katana')) {
+        return `请用 MultiAgent 启动 web-probe 子agent:\n  MultiAgent({ agents: [{ subagent_type: "web-probe", description: "Web探测", prompt: "..." }] })`
+      }
+      if (cmd.includes('chisel') || cmd.includes('stowaway') || cmd.includes('proxychains')) {
+        return `请用 Agent 启动 tunnel 子agent:\n  Agent({ subagent_type: "tunnel", description: "内网穿透", prompt: "..." })`
+      }
+      if (cmd.includes('linpeas') || cmd.includes('winpeas')) {
+        return `请用 Agent 启动 privesc 子agent:\n  Agent({ subagent_type: "privesc", description: "权限提升", prompt: "..." })`
+      }
+      // Reading sub-agent output files is allowed via Read tool
+      if (cmd.includes('tail') || cmd.includes('cat') || cmd.includes('head')) {
+        return `读取文件请用 Read 工具:\n  Read({ file_path: "SESSION_DIR/xxx.txt" })`
+      }
+    }
+
+    return `${suggestion.reason}。请用 MultiAgent/Agent 启动 ${suggestion.type} 子agent。`
   }
 }

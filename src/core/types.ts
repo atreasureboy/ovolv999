@@ -117,6 +117,12 @@ export interface EngineConfig {
   progressTracker?: import('./progressTracker.js').ProgressTracker
   /** Cache for tool execution results */
   toolCache?: import('./toolCache.js').ToolCache
+  /**
+   * Coordinator mode: main agent acts as orchestrator only.
+   * Scanning/exploitation tools are blocked — must delegate to sub-agents.
+   * Only applies to the main agent (sessionDir is set), not sub-agents.
+   */
+  coordinatorMode?: boolean
 }
 
 export interface TurnResult {
