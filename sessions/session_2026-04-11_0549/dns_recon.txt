@@ -1,0 +1,54 @@
+==========================================
+DNS Reconnaissance Report - zhhovo.top
+==========================================
+Date: 2026-04-11
+Session: session_2026-04-11_0549
+
+1. SUMMARY
+===========
+- Subdomains discovered: 2
+- Unique IP addresses: 1
+- Main domain IP: 39.106.227.104
+- Nameservers: 2 (Aliyun/Hichina)
+
+2. SUBDOMAIN ENUMERATION (Subfinder)
+=====================================
+www.zhhovo.top
+xinsheng.zhhovo.top
+
+3. DNS RESOLUTION (A Records)
+==============================
+zhhovo.top          -> 39.106.227.104
+www.zhhovo.top      -> 39.106.227.104
+xinsheng.zhhovo.top -> 39.106.227.104
+
+4. OTHER DNS RECORDS
+====================
+Nameservers (NS):
+  dns31.hichina.com
+  dns32.hichina.com
+
+Mail Exchange (MX): None found
+Text Records (TXT): None found
+Canonical Name (CNAME): None found
+
+5. ANALYSIS
+============
+- All discovered subdomains point to the same IP: 39.106.227.104
+- Likely a single server hosting multiple services/subdomains
+- DNS hosted by Aliyun (Hichina), suggesting Chinese hosting/registration
+- Simple domain structure with only 2 subdomains found via passive enumeration
+- Limited attack surface from DNS perspective
+
+6. RECOMMENDATIONS FOR NEXT PHASE
+==================================
+1. Port scan on 39.106.227.104 (focus on web ports: 80, 443, 8080, 8443)
+2. Web application fingerprinting on discovered subdomains
+3. Consider deeper enumeration techniques (amass passive/active, crt.sh)
+4. Check for additional services running on same IP
+
+7. FILES IN SESSION DIRECTORY
+==============================
+subfinder.txt - Raw subdomain enumeration results
+dnsx.txt      - DNS resolution results
+dns_recon.txt - This comprehensive report

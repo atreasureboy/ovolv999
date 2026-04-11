@@ -45,6 +45,7 @@ import { buildFullSystemPrompt } from '../src/prompts/system.js'
 import { PriorityQueue } from '../src/core/priorityQueue.js'
 import { ProgressTracker } from '../src/core/progressTracker.js'
 import { ToolCache } from '../src/core/toolCache.js'
+import { tmuxLayout } from '../src/ui/tmuxLayout.js'
 
 const VERSION = '0.1.0'
 
@@ -626,6 +627,13 @@ async function main(): Promise<void> {
   const primaryTarget = engagement?.targets?.[0]
   const sessionDir = createSessionDir(cwd, primaryTarget)
   renderer.info(`Session dir: ${sessionDir}`)
+
+  // Initialize tmux 4-pane layout for sub-agent monitoring (no-op if not in tmux)
+  const agentLogDir = join(sessionDir, 'agent-logs')
+  const layoutReady = tmuxLayout.init(agentLogDir)
+  if (layoutReady) {
+    renderer.info(`UI: 四宫格布局已就绪 — 子 agent 输出将显示在右侧/左下面板`)
+  }
 
   // Build the full system prompt once (OVOGO.md + memory + engagement + sessionDir injected)
   const memorySection = buildMemorySystemSection(memoryDir)

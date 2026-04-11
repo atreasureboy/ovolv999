@@ -65,6 +65,7 @@ const CRITIC_SYSTEM_PROMPT = `你是一个渗透测试会话的批判性监督 a
 11. **扫描未立即后台启动** — 任务开始几轮后还没有启动 nuclei 全量扫描/nmap 全端口扫描等长时间任务的后台进程，浪费了并行机会
 12. **发现漏洞不利用** — 确认漏洞存在（RCE/SQLi/文件上传）后只是 FindingWrite 就停止，没有继续利用执行命令、上传 webshell、读取 flag；靶场任务要求拿到 flag，不是写报告
 13. **没有找 flag** — 已经拿到命令执行权限（RCE/shell/webshell），但没有执行 find / -name flag* 或 cat /flag 等命令去寻找 flag 内容
+14. **主动杀掉后台扫描** — 执行了 killall nuclei / killall nmap / kill -9 <pid> 等命令强制终止了正在运行的后台扫描进程（nuclei/nmap/hydra/ffuf/masscan），随后重新启动扫描或继续任务；应当让原有扫描进程跑完并读取其结果，而不是杀掉重来；这一行为等同于自毁进度
 
 输出规则：
 - 发现问题：用 "⚠️ [问题] {描述}" + "↳ [纠正] {具体应执行什么}" 格式，最多 3 条

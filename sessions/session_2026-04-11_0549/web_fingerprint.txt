@@ -1,0 +1,119 @@
+=== Web指纹识别和技术栈探测报告 ===
+=== 1. 获取主目标网站信息 ===
+--- 检查HTTPS连接 ---
+HTTP/2 504 
+server: Tengine
+date: Sat, 11 Apr 2026 05:57:37 GMT
+content-type: text/html
+content-length: 160
+set-cookie: SITE_TOTAL_ID=df755c903bc4f558de851bd2337f0f21; Path=/; Max-Age=259200000; HttpOnly
+set-cookie: sl-session=+eq1XVE022m9X21TIIiRZQ==; SameSite=None; Secure; Path=/; Max-Age=86400; HttpOnly
+
+
+--- 尝试HTTP连接 ---
+HTTP/1.1 504 Gateway Time-out
+Date: Sat, 11 Apr 2026 06:07:17 GMT
+Content-Type: text/html
+Content-Length: 160
+Connection: keep-alive
+Set-Cookie: SITE_TOTAL_ID=e04ecb97e648ece9457be7452b4a26a9; Path=/; Max-Age=259200000; HttpOnly
+Set-Cookie: sl-session=4B3TS5U222nqQxHxQZSTTg==; Path=/; Max-Age=86400; HttpOnly
+
+
+--- 检查 www.zhhovo.top HTTPS ---
+HTTP/2 504 
+server: Tengine
+date: Sat, 11 Apr 2026 06:12:26 GMT
+content-type: text/html
+content-length: 160
+set-cookie: SITE_TOTAL_ID=4729b39ff1cf8f8372a19b28822a1bc9; Path=/; Max-Age=259200000; HttpOnly
+set-cookie: sl-session=DZxaaso322n6EcZT0LEbLQ==; SameSite=None; Secure; Path=/; Max-Age=86400; HttpOnly
+
+
+--- 尝试获取页面内容（短超时） ---
+
+=== 2. 使用whatweb技术栈识别 ===
+
+--- 测试所有子域名响应 ---
+测试 zhhovo.top: 200 127836 bytes
+测试 www.zhhovo.top: 301 0 bytes
+测试 xinsheng.zhhovo.top: 200 138 bytes
+=== 3. 测试IP直接访问 ===
+--- 直接访问IP 39.106.227.104 ---
+HTTP/1.1 200 OK
+Date: Sat, 11 Apr 2026 06:19:36 GMT
+Content-Type: text/html
+Content-Length: 138
+Connection: keep-alive
+Last-Modified: Sun, 19 Oct 2025 10:18:19 GMT
+ETag: "68f4baeb-8a"
+Accept-Ranges: bytes
+Set-Cookie: sl-session=2Lvrd3g522k0PKzfNe3JLA==; Path=/; Max-Age=86400; HttpOnly
+
+
+--- 获取IP页面内容 ---
+<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center>nginx</center>
+</body>
+</html>
+=== 4. 获取主域名页面内容 ===
+--- zhhovo.top 完整页面（前500字符）---
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+	<meta charset="UTF-8 ">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<link rel="profile" href="https://gmpg.org/xfn/11">
+
+<title>ZHHQZS</title>
+<meta name='robots' content='max-image-preview:large' />
+<link rel='dns-prefetch' href='//fonts.googleapis.com' />
+<link rel="alternate" type="application/rss+xml" title="ZHHQZS &raquo; Feed" href="https://zhhovo.top/index.php/feed/" />
+<link rel="alternate" type="application/rss+xml
+--- 提取页面标题 ---
+<title>ZHHQZS</title>
+
+=== 5. 技术栈识别 (whatweb) ===
+usage: whatweb [-h] target
+whatweb: error: unrecognized arguments: -v
+
+=== 6. 常见文件和目录检查 ===
+--- robots.txt ---
+<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center>nginx</center>
+</body>
+</html>
+--- sitemap.xml ---
+<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center>nginx</center>
+</body>
+</html>
+=== 7. 更多文件和目录检查 ===
+http://zhhovo.top/ [200 OK]  MetaGenerator[WordPress 6.9.4, Elementor 3.32.3; features: e_font_icon_svg, additional_custom_breakpoints; settings: css_print_method-internal, google_font-enabled, font_display-swap, ] Title[ZHHQZS] WordPres[6.9.4]  
+
+
+检查 http://zhhovo.top/wp-admin:
+301 162
+检查 http://zhhovo.top/wp-login.php:
+302 0
+检查 http://zhhovo.top/wp-content:
+301 162
+检查 http://zhhovo.top/wp-includes:
+301 162
+检查 http://zhhovo.top/admin:
+404 138
+检查 http://zhhovo.top/administrator:
+404 138
+检查 http://zhhovo.top/api:
+404 138
+检查 http://zhhovo.top/backup:
+404 138

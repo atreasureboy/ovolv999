@@ -10,6 +10,8 @@ import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/type
 import type { EngineConfig } from '../core/types.js'
 import { getAgentTypeSystemPrompt } from '../prompts/system.js'
 import { getRedTeamAgentPrompt, type RedTeamAgentType } from '../prompts/agentPrompts.js'
+import { Renderer } from '../ui/renderer.js'
+import { tmuxLayout } from '../ui/tmuxLayout.js'
 
 // Generic legacy types (kept for backward-compat)
 type LegacyAgentType = 'general-purpose' | 'explore' | 'plan' | 'code-reviewer'
@@ -51,6 +53,10 @@ export function registerAgentFactory(
 /**
  * Shared runner used by both AgentTool and MultiAgentTool.
  * Returns a ToolResult with prefixed agent type.
+ *
+ * When running inside a tmux 4-pane layout, acquires a pane slot and creates
+ * a file-backed renderer so the sub-agent's detailed output streams to its
+ * dedicated pane.  The main renderer still shows high-level agentStart/Done markers.
  */
 export async function runAgentTask(
   description: string,
@@ -63,11 +69,21 @@ export async function runAgentTask(
     return { content: 'Error: AgentTool 未初始化', isError: true }
   }
 
-  const renderer = _currentRenderer as {
+  // Main renderer: shows high-level agentStart/Done markers on main pane
+  const mainRenderer = _currentRenderer as {
     agentStart: (desc: string, type: string) => void
     agentDone:  (desc: string, success: boolean) => void
   }
-  renderer.agentStart(description, agentType)
+  mainRenderer.agentStart(description, agentType)
+
+  // Attempt to acquire a tmux pane slot for detailed output
+  const agentLabel = `[${agentType}] ${description}`
+  const paneSlot = tmuxLayout.acquireSlot(agentLabel)
+
+  // Child renderer: file-backed if a pane slot is available, else share main renderer
+  const childRenderer = paneSlot
+    ? Renderer.forFile(paneSlot.logFile)
+    : (_currentRenderer as Renderer)
 
   let systemPrompt: string
   if (RED_TEAM_TYPES.has(agentType)) {
@@ -89,11 +105,13 @@ export async function runAgentTask(
     sessionDir: undefined,
   }
 
-  const childEngine = _engineFactory(childConfig, _currentRenderer)
+  const childEngine = _engineFactory(childConfig, childRenderer)
 
   try {
     const { result } = await childEngine.runTurn(prompt, [])
-    renderer.agentDone(description, result.reason !== 'error')
+    mainRenderer.agentDone(description, result.reason !== 'error')
+
+    if (paneSlot) tmuxLayout.releaseSlot(paneSlot.slot)
 
     if (!result.output) {
       return {
@@ -106,7 +124,8 @@ export async function runAgentTask(
       isError: false,
     }
   } catch (err: unknown) {
-    renderer.agentDone(description, false)
+    mainRenderer.agentDone(description, false)
+    if (paneSlot) tmuxLayout.releaseSlot(paneSlot.slot)
     return {
       content: `[${agentType}] "${description}" 异常: ${(err as Error).message}`,
       isError: true,

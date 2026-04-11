@@ -7,7 +7,13 @@
  * - Gradient-style separators
  * - ✻ spinner with rotating verbs during thinking
  * - Tool call boxes with per-tool color coding
+ *
+ * Supports writing to a custom stream (e.g. a file WriteStream for sub-agent panes).
+ * Use Renderer.forFile(path) to create a file-backed renderer.
  */
+
+import { createWriteStream } from 'fs'
+import type { WriteStream } from 'fs'
 
 // ─────────────────────────────────────────────────────────────
 // ANSI helpers
@@ -57,9 +63,6 @@ const CURSOR = {
   clearLine: `${ESC}2K`,
   clearToEnd: `${ESC}0K`,
 }
-
-const w = (s: string) => process.stdout.write(s)
-const isTTY = process.stdout.isTTY
 
 // ─────────────────────────────────────────────────────────────
 // OVOGO ASCII art logo (block font)
@@ -182,13 +185,31 @@ export class Renderer {
   private termWidth: number
   private _assistantLineStarted = false
 
-  constructor() {
-    this.termWidth = isTTY ? (process.stdout.columns ?? 80) : 80
-    if (isTTY) {
-      process.stdout.on('resize', () => {
-        this.termWidth = process.stdout.columns ?? 80
+  /** Instance-level write function — routes to stdout or a file stream */
+  private write: (s: string) => void
+  /** Whether the output stream is a real TTY (affects spinner, cursor codes) */
+  private isTTY: boolean
+
+  constructor(options?: { stream?: NodeJS.WritableStream }) {
+    const stream = options?.stream ?? process.stdout
+    this.write = (s: string) => { stream.write(s) }
+    this.isTTY = (stream as NodeJS.WriteStream).isTTY === true
+    this.termWidth = this.isTTY ? ((stream as NodeJS.WriteStream).columns ?? 80) : 80
+    if (this.isTTY) {
+      (stream as NodeJS.WriteStream).on?.('resize', () => {
+        this.termWidth = (stream as NodeJS.WriteStream).columns ?? 80
       })
     }
+  }
+
+  /**
+   * Create a renderer that writes to a log file.
+   * Ideal for sub-agent panes in tmux 4-grid layout.
+   * ANSI escape codes are preserved so tmux pane `tail -f` renders color.
+   */
+  static forFile(filePath: string): Renderer {
+    const fileStream = createWriteStream(filePath, { flags: 'a' }) as unknown as NodeJS.WritableStream
+    return new Renderer({ stream: fileStream })
   }
 
   // ── Banner ───────────────────────────────────────────────────
@@ -197,18 +218,18 @@ export class Renderer {
     const barWidth = Math.min(this.termWidth - 4, 48)
     const bar = `${FG.brightBlack}${'━'.repeat(barWidth)}${RESET}`
 
-    w('\n')
+    this.write('\n')
     for (const line of LOGO_LINES) {
-      w(`  ${FG.brightMagenta}${BOLD}${line}${RESET}\n`)
+      this.write(`  ${FG.brightMagenta}${BOLD}${line}${RESET}\n`)
     }
-    w('\n')
-    w(`  ${bar}\n`)
-    w(
+    this.write('\n')
+    this.write(`  ${bar}\n`)
+    this.write(
       `  ${DIM}version${RESET} ${FG.brightWhite}${version}${RESET}` +
         `   ${DIM}model${RESET} ${FG.brightCyan}${model}${RESET}\n`,
     )
-    w(`  ${bar}\n`)
-    w('\n')
+    this.write(`  ${bar}\n`)
+    this.write('\n')
   }
 
   // ── Section separator — gradient style ───────────────────────
@@ -217,7 +238,7 @@ export class Renderer {
     const innerWidth = Math.min(this.termWidth - 10, 68)
     const mid = `${DIM}${'─'.repeat(innerWidth)}${RESET}`
     const cap = `${FG.brightBlack}▒${RESET}`
-    w(`\n  ${cap}${mid}${cap}\n`)
+    this.write(`\n  ${cap}${mid}${cap}\n`)
   }
 
   // ── Human message — blue framed box with stripe ──────────────
@@ -227,16 +248,16 @@ export class Renderer {
     const topBar = `${FG.brightBlue}╭${'─'.repeat(innerWidth)}╮${RESET}`
     const botBar = `${FG.brightBlue}╰${'─'.repeat(innerWidth)}╯${RESET}`
 
-    w('\n')
-    w(`  ${topBar}\n`)
+    this.write('\n')
+    this.write(`  ${topBar}\n`)
 
     const lines = text.split('\n')
     for (const line of lines) {
       const content = `${FG.brightBlue}❯${RESET} ${BOLD}${FG.brightWhite}${line}${RESET}`
-      w(`  ${FG.brightBlue}│${RESET} ${content}\n`)
+      this.write(`  ${FG.brightBlue}│${RESET} ${content}\n`)
     }
 
-    w(`  ${botBar}\n`)
+    this.write(`  ${botBar}\n`)
   }
 
   // ── Assistant text output (non-streaming) ────────────────────
@@ -244,9 +265,9 @@ export class Renderer {
   assistantText(text: string): void {
     const width = Math.min(this.termWidth - 8, 96)
     const lines = wrapText(text, width).split('\n')
-    w('\n')
+    this.write('\n')
     for (const line of lines) {
-      w(`  ${STRIPE.assistant} ${line}\n`)
+      this.write(`  ${STRIPE.assistant} ${line}\n`)
     }
   }
 
@@ -257,7 +278,7 @@ export class Renderer {
   beginAssistantText(): void {
     this.streamingActive = true
     this._assistantLineStarted = false
-    w('\n')
+    this.write('\n')
   }
 
   streamToken(token: string): void {
@@ -265,17 +286,17 @@ export class Renderer {
       this.beginAssistantText()
     }
     if (!this._assistantLineStarted) {
-      w(`  ${STRIPE.assistant} `)
+      this.write(`  ${STRIPE.assistant} `)
       this._assistantLineStarted = true
     }
     // After each newline, re-emit the left stripe prefix
     const indented = token.replace(/\n/g, `\n  ${STRIPE.assistant} `)
-    w(indented)
+    this.write(indented)
   }
 
   endAssistantText(): void {
     if (this.streamingActive) {
-      w('\n')
+      this.write('\n')
       this.streamingActive = false
       this._assistantLineStarted = false
     }
@@ -287,7 +308,7 @@ export class Renderer {
   toolStart(toolName: string, input: Record<string, unknown>): void {
     const preview = this.formatToolPreview(toolName, input)
     const nameColor = this.toolColor(toolName)
-    w(
+    this.write(
       `\n  ${STRIPE.tool}  ${BOLD}${nameColor}${toolName}${RESET}` +
         `  ${FG.brightBlack}${preview}${RESET}\n`,
     )
@@ -302,7 +323,7 @@ export class Renderer {
         : result
 
     if (isError) {
-      w(`  ${stripe}  ${FG.brightRed}${truncated}${RESET}\n`)
+      this.write(`  ${stripe}  ${FG.brightRed}${truncated}${RESET}\n`)
       return
     }
 
@@ -311,10 +332,10 @@ export class Renderer {
     const hidden = lines.length - shown.length
 
     for (const line of shown) {
-      w(`  ${stripe}  ${DIM}${line}${RESET}\n`)
+      this.write(`  ${stripe}  ${DIM}${line}${RESET}\n`)
     }
     if (hidden > 0) {
-      w(`  ${stripe}  ${DIM}… ${hidden} more line${hidden !== 1 ? 's' : ''}${RESET}\n`)
+      this.write(`  ${stripe}  ${DIM}… ${hidden} more line${hidden !== 1 ? 's' : ''}${RESET}\n`)
     }
   }
 
@@ -374,7 +395,7 @@ export class Renderer {
   // ── Spinner ───────────────────────────────────────────────────
 
   startSpinner(initialVerb?: string): void {
-    if (!isTTY) return
+    if (!this.isTTY) return
     if (this.spinnerInterval) this.stopSpinner()
 
     this.spinnerVerbIndex = Math.floor(Math.random() * SPINNER_VERBS.length)
@@ -386,7 +407,7 @@ export class Renderer {
       if (idx !== -1) this.spinnerVerbIndex = idx
     }
 
-    w(CURSOR.hide)
+    this.write(CURSOR.hide)
     this.renderSpinner()
 
     this.spinnerInterval = setInterval(() => {
@@ -401,13 +422,13 @@ export class Renderer {
   }
 
   private renderSpinner(): void {
-    if (!isTTY) return
+    if (!this.isTTY) return
     const frame = SPINNER_FRAMES[this.spinnerFrame]
     const verb = SPINNER_VERBS[this.spinnerVerbIndex]
     const line =
       `  ${FG.brightMagenta}${frame}${RESET} ` +
       `${FG.brightBlack}${verb}${RESET}${FG.brightBlack}…${RESET}`
-    w(CURSOR.col(1) + CURSOR.clearToEnd + line)
+    this.write(CURSOR.col(1) + CURSOR.clearToEnd + line)
     this.lastSpinnerLineLen = line.replace(/\x1b\[[^m]*m/g, '').length
   }
 
@@ -415,8 +436,8 @@ export class Renderer {
     if (!this.spinnerInterval) return
     clearInterval(this.spinnerInterval)
     this.spinnerInterval = null
-    if (isTTY) {
-      w(CURSOR.col(1) + CURSOR.clearLine + CURSOR.show)
+    if (this.isTTY) {
+      this.write(CURSOR.col(1) + CURSOR.clearLine + CURSOR.show)
     }
     this.lastSpinnerLineLen = 0
   }
@@ -424,36 +445,36 @@ export class Renderer {
   // ── Status / info messages ────────────────────────────────────
 
   info(msg: string): void {
-    w(`  ${DIM}${msg}${RESET}\n`)
+    this.write(`  ${DIM}${msg}${RESET}\n`)
   }
 
   success(msg: string): void {
-    w(`  ${FG.brightGreen}✓${RESET} ${msg}\n`)
+    this.write(`  ${FG.brightGreen}✓${RESET} ${msg}\n`)
   }
 
   error(msg: string): void {
-    w(`  ${FG.brightRed}✗${RESET} ${FG.red}${msg}${RESET}\n`)
+    this.write(`  ${FG.brightRed}✗${RESET} ${FG.red}${msg}${RESET}\n`)
   }
 
   warn(msg: string): void {
-    w(`  ${FG.yellow}⚠${RESET} ${FG.yellow}${msg}${RESET}\n`)
+    this.write(`  ${FG.yellow}⚠${RESET} ${FG.yellow}${msg}${RESET}\n`)
   }
 
   // ── Sub-agent display ─────────────────────────────────────────
 
   agentStart(description: string, agentType = 'general-purpose'): void {
     const typeLabel = agentType !== 'general-purpose' ? `  ${FG.brightBlack}[${agentType}]${RESET}` : ''
-    w(`\n  ${STRIPE.agent}  ${BOLD}${FG.brightMagenta}⎇ Agent${RESET}${typeLabel}  ${DIM}${description}${RESET}\n`)
+    this.write(`\n  ${STRIPE.agent}  ${BOLD}${FG.brightMagenta}⎇ Agent${RESET}${typeLabel}  ${DIM}${description}${RESET}\n`)
   }
 
   agentDone(description: string, success: boolean): void {
     const icon = success ? `${FG.brightGreen}✓${RESET}` : `${FG.brightRed}✗${RESET}`
-    w(`  ${STRIPE.agent}  ${icon} ${DIM}Agent "${description}" done${RESET}\n`)
+    this.write(`  ${STRIPE.agent}  ${icon} ${DIM}Agent "${description}" done${RESET}\n`)
   }
 
   /** Show plan mode banner before a plan run */
   planModeStart(): void {
-    w(
+    this.write(
       `\n  ${FG.brightBlue}┌${'─'.repeat(50)}┐${RESET}\n` +
       `  ${FG.brightBlue}│${RESET}  ${BOLD}${FG.brightCyan}✦ PLAN MODE${RESET}  ${DIM}(read-only analysis)${RESET}` +
       `${' '.repeat(17)}${FG.brightBlue}│${RESET}\n` +
@@ -463,13 +484,13 @@ export class Renderer {
 
   /** Ask the user to confirm plan execution, returns the raw line */
   planConfirmPrompt(): void {
-    w(`\n  ${FG.brightYellow}?${RESET} Proceed with execution? ${DIM}[y/N]${RESET} `)
+    this.write(`\n  ${FG.brightYellow}?${RESET} Proceed with execution? ${DIM}[y/N]${RESET} `)
   }
 
   // ── Compact notifications ─────────────────────────────────────
 
   compactStart(tokenCount: number): void {
-    w(
+    this.write(
       `\n  ${STRIPE.compact}  ${FG.yellow}⟳${RESET}` +
         `  ${DIM}Context ~${Math.round(tokenCount / 1000)}k tokens — compacting…${RESET}\n`,
     )
@@ -477,7 +498,7 @@ export class Renderer {
 
   compactDone(originalTokens: number, summaryTokens: number): void {
     const saved = Math.round((1 - summaryTokens / originalTokens) * 100)
-    w(
+    this.write(
       `  ${STRIPE.compact}  ${FG.brightGreen}✓${RESET}` +
         `  ${DIM}~${Math.round(originalTokens / 1000)}k → ~${Math.round(summaryTokens / 1000)}k tokens (${saved}% saved)${RESET}\n`,
     )
@@ -486,18 +507,18 @@ export class Renderer {
   // ── Turn stats ────────────────────────────────────────────────
 
   turnStats(iterations: number, model: string): void {
-    w(`\n  ${DIM}↩ ${iterations} turn${iterations !== 1 ? 's' : ''} · ${model}${RESET}\n`)
+    this.write(`\n  ${DIM}↩ ${iterations} turn${iterations !== 1 ? 's' : ''} · ${model}${RESET}\n`)
   }
 
   // ── Input prompt ──────────────────────────────────────────────
 
   writePrompt(): void {
-    w(`\n${FG.brightBlue}❯${RESET} `)
+    this.write(`\n${FG.brightBlue}❯${RESET} `)
   }
 
   writeInterruptPrompt(): void {
     // \x07 = BEL — terminal bell to alert user
-    w(
+    this.write(
       `\x07\n` +
       `${FG.brightYellow}${'─'.repeat(60)}${RESET}\n` +
       `${FG.brightYellow}  ⚡ 任务已暂停${RESET}  ${BOLD}输入建议后按 Enter 注入并继续${RESET}\n` +
@@ -508,12 +529,12 @@ export class Renderer {
   }
 
   interruptInjected(msg: string): void {
-    w(
+    this.write(
       `\n  ${FG.brightYellow}⚡${RESET} ${DIM}已注入:${RESET} ${FG.brightWhite}${msg.slice(0, 120)}${msg.length > 120 ? '…' : ''}${RESET}\n`,
     )
   }
 
   newline(): void {
-    w('\n')
+    this.write('\n')
   }
 }
