@@ -472,6 +472,20 @@ export class Renderer {
     this.write(`  ${STRIPE.agent}  ${icon} ${DIM}Agent "${description}" done${RESET}\n`)
   }
 
+  /**
+   * Print a brief summary of a completed sub-agent in the main terminal.
+   * Shows the first few lines of the agent's output so the user can see
+   * progress without switching to the tmux window.
+   */
+  agentSummary(agentType: string, description: string, summary: string): void {
+    const header = `  ${STRIPE.agent}  ${BOLD}${FG.brightMagenta}[${agentType}]${RESET} ${DIM}${description}${RESET}\n`
+    const body = summary
+      .split('\n')
+      .map(line => `  ${STRIPE.agent}    ${DIM}${line}${RESET}`)
+      .join('\n')
+    this.write(`${header}${body}\n`)
+  }
+
   /** Show plan mode banner before a plan run */
   planModeStart(): void {
     this.write(

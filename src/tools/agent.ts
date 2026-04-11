@@ -79,10 +79,11 @@ export async function runAgentTask(
     return { content: 'Error: AgentTool 未初始化', isError: true }
   }
 
-  // Main renderer: shows high-level agentStart/Done markers on main pane
+  // Main renderer: shows high-level agentStart/Done markers + brief summaries on main pane
   const mainRenderer = _currentRenderer as {
-    agentStart: (desc: string, type: string) => void
-    agentDone:  (desc: string, success: boolean) => void
+    agentStart:   (desc: string, type: string) => void
+    agentDone:    (desc: string, success: boolean) => void
+    agentSummary: (agentType: string, desc: string, summary: string) => void
   }
   mainRenderer.agentStart(description, agentType)
 
@@ -141,6 +142,18 @@ export async function runAgentTask(
         isError: false,
       }
     }
+
+    // Show a brief summary in main terminal (first 8 non-empty lines of output)
+    const summaryLines = result.output
+      .split('\n')
+      .map((l: string) => l.trimEnd())
+      .filter((l: string) => l.trim().length > 0)
+      .slice(0, 8)
+      .join('\n')
+    if (summaryLines) {
+      mainRenderer.agentSummary(agentType, description, summaryLines)
+    }
+
     return {
       content: `[${agentType}] "${description}":\n\n${result.output}`,
       isError: false,
