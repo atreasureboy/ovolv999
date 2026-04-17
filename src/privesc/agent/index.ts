@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import type { ToolResult } from '../../core/agentTypes.js';
 import type { KernelExploitResult, DockerEscapeResult } from '../tools/index.js';
 import {
@@ -66,7 +66,7 @@ interface PrivescGraph {
  * 5. 生成详细的提权报告
  */
 export class PrivescAgent {
-  private client: Anthropic;
+  private client: OpenAI;
   private graph: PrivescGraph;
   private conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
@@ -75,8 +75,8 @@ export class PrivescAgent {
     private sessionDir: string,
     apiKey?: string
   ) {
-    this.client = new Anthropic({
-      apiKey: apiKey || process.env.ANTHROPIC_API_KEY
+    this.client = new OpenAI({
+      apiKey: apiKey || process.env.OPENAI_API_KEY
     });
 
     this.graph = {
@@ -156,16 +156,16 @@ export class PrivescAgent {
     });
 
     try {
-      const response = await this.client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+      const response = await this.client.chat.completions.create({
+        model: 'gpt-4o',
         max_tokens: 500,
-        system: this.getSystemPrompt(),
-        messages: this.conversationHistory
+        messages: [
+          { role: 'system', content: this.getSystemPrompt() },
+          ...this.conversationHistory
+        ]
       });
 
-      const decision = response.content[0].type === 'text'
-        ? response.content[0].text.trim().toLowerCase()
-        : 'enumerate_vectors';
+      const decision = (response.choices[0].message.content ?? 'enumerate_vectors').trim().toLowerCase();
 
       this.conversationHistory.push({
         role: 'assistant',

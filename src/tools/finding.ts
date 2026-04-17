@@ -65,10 +65,8 @@ function updateAnchorsFromFinding(sessionDir: string | undefined, f: Finding): v
 
   // CVE anchors
   if (f.cve) {
-    for (const c of f.cve) {
-      if (!anchors.cves.some(x => x.cve === c && x.target === f.target)) {
-        anchors.cves.push({ cve: c, target: f.target, score: f.severity === 'critical' ? 95 : f.severity === 'high' ? 80 : 60 })
-      }
+    if (!anchors.cves.some(x => x.cve === f.cve && x.target === f.target)) {
+      anchors.cves.push({ cve: f.cve, target: f.target, score: f.severity === 'critical' ? 95 : f.severity === 'high' ? 80 : 60 })
     }
   }
 
@@ -315,12 +313,13 @@ export class FindingListTool implements Tool {
     const statusFilter = (input.status_filter as string) || 'all'
 
     const dir = getFindingsDir(context.cwd)
-    let findings = loadAllFindings(dir)
+    const allFindings = loadAllFindings(dir)
 
-    if (findings.length === 0) {
+    if (allFindings.length === 0) {
       return { content: '暂无 Findings。使用 FindingWrite 记录第一条漏洞。', isError: false }
     }
 
+    let findings = allFindings
     if (severityFilter !== 'all') {
       findings = findings.filter((f) => f.severity === severityFilter)
     }
@@ -338,7 +337,7 @@ export class FindingListTool implements Tool {
     // 按严重等级排序
     findings.sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity))
 
-    const total = loadAllFindings(dir)
+    const total = allFindings
     const stats = {
       critical: total.filter((f) => f.severity === 'critical').length,
       high:     total.filter((f) => f.severity === 'high').length,

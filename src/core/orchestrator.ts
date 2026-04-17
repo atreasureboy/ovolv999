@@ -557,13 +557,14 @@ export class BattleOrchestrator {
     // Simple regex-based extraction
     const criticalMatches = output.match(/\[(CRITICAL|HIGH|MEDIUM|LOW)\]\s+(.+)/gi)
     if (criticalMatches) {
+      const priorCount = this.phaseMachine.findings.length
       for (const match of criticalMatches) {
         const sevMatch = match.match(/\[(CRITICAL|HIGH|MEDIUM|LOW)\]/i)
         const sev = sevMatch ? sevMatch[1].toLowerCase() : 'info'
         const title = match.replace(/\[.*?\]\s*/, '').trim()
         this.phaseMachine.recordFinding(sev, title)
-        this.taskDAG.update(taskId, { findings: this.phaseMachine.findings.length })
       }
+      this.taskDAG.update(taskId, { findings: this.phaseMachine.findings.length - priorCount })
     }
 
     // Shell detection

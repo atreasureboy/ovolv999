@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import type { ToolResult } from '../../core/agentTypes.js';
 import {
   discoverInternalHosts,
@@ -77,7 +77,7 @@ interface LateralGraph {
  * 6. 维护横向移动拓扑图
  */
 export class LateralAgent {
-  private client: Anthropic;
+  private client: OpenAI;
   private graph: LateralGraph;
   private conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
@@ -87,8 +87,8 @@ export class LateralAgent {
     private subnet?: string,
     apiKey?: string
   ) {
-    this.client = new Anthropic({
-      apiKey: apiKey || process.env.ANTHROPIC_API_KEY
+    this.client = new OpenAI({
+      apiKey: apiKey || process.env.OPENAI_API_KEY
     });
 
     this.graph = {
@@ -179,16 +179,16 @@ ${this.graph.internalNetwork.hosts
     });
 
     try {
-      const response = await this.client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+      const response = await this.client.chat.completions.create({
+        model: 'gpt-4o',
         max_tokens: 500,
-        system: this.getSystemPrompt(),
-        messages: this.conversationHistory
+        messages: [
+          { role: 'system', content: this.getSystemPrompt() },
+          ...this.conversationHistory
+        ]
       });
 
-      const decision = response.content[0].type === 'text'
-        ? response.content[0].text.trim().toLowerCase()
-        : 'recon_network';
+      const decision = (response.choices[0].message.content ?? 'recon_network').trim().toLowerCase();
 
       this.conversationHistory.push({
         role: 'assistant',

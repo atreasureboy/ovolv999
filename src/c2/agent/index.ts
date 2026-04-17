@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import type { ToolResult } from '../../core/agentTypes.js';
 import {
   startMetasploitListener,
@@ -78,7 +78,7 @@ interface C2Graph {
  * 6. 维护C2拓扑图
  */
 export class C2Agent {
-  private client: Anthropic;
+  private client: OpenAI;
   private graph: C2Graph;
   private conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
@@ -89,8 +89,8 @@ export class C2Agent {
     private targets: Array<{ shellId: string; ip: string; os: string }> = [],
     apiKey?: string
   ) {
-    this.client = new Anthropic({
-      apiKey: apiKey || process.env.ANTHROPIC_API_KEY
+    this.client = new OpenAI({
+      apiKey: apiKey || process.env.OPENAI_API_KEY
     });
 
     this.graph = {
@@ -181,16 +181,16 @@ export class C2Agent {
     });
 
     try {
-      const response = await this.client.messages.create({
-        model: 'claude-sonnet-4-20250514',
+      const response = await this.client.chat.completions.create({
+        model: 'gpt-4o',
         max_tokens: 500,
-        system: this.getSystemPrompt(),
-        messages: this.conversationHistory
+        messages: [
+          { role: 'system', content: this.getSystemPrompt() },
+          ...this.conversationHistory
+        ]
       });
 
-      const decision = response.content[0].type === 'text'
-        ? response.content[0].text.trim().toLowerCase()
-        : 'deploy_metasploit';
+      const decision = (response.choices[0].message.content ?? 'deploy_metasploit').trim().toLowerCase();
 
       this.conversationHistory.push({
         role: 'assistant',
