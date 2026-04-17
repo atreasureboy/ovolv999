@@ -49,6 +49,27 @@ export class InputHandler {
     })
   }
 
+  /**
+   * Read a line with a styled prompt prefix.
+   * The prefix is rendered outside readline so we control its colors.
+   */
+  async readLineStyled(prefix: string): Promise<InputResult> {
+    return new Promise((resolve) => {
+      this.rl.once('close', () => {
+        resolve({ text: '', eof: true })
+      })
+
+      // Render the styled prefix, then let readline capture input after it
+      process.stdout.write(prefix)
+      this.rl.question('', (answer) => {
+        if (answer.trim()) {
+          this.history.unshift(answer)
+        }
+        resolve({ text: answer, eof: false })
+      })
+    })
+  }
+
   close(): void {
     this.rl.close()
   }

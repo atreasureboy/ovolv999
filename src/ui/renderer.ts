@@ -1,12 +1,14 @@
 /**
- * Terminal UI Renderer — pure process.stdout.write, zero UI frameworks
+ * Terminal UI Renderer — modern terminal aesthetic
  *
  * Visual design:
- * - OVOGO ASCII art banner at startup
+ * - Gradient OVOGO ASCII art banner
  * - Colored left-border stripes per section type
- * - Gradient-style separators
- * - ✻ spinner with rotating verbs during thinking
- * - Tool call boxes with per-tool color coding
+ * - Box-framed tool call display
+ * - Consistent icon system for status messages
+ * - Styled REPL prompt with phase indicator
+ * - Braille spinner with rotating verbs
+ * - Per-tool color coding
  *
  * Supports writing to a custom stream (e.g. a file WriteStream for sub-agent panes).
  * Use Renderer.forFile(path) to create a file-backed renderer.
@@ -45,10 +47,17 @@ const FG = {
   brightWhite: `${ESC}97m`,
 }
 
-// Background colors (subtle tints for stripe accents)
+// Background colors
 const BG = {
   blue: `${ESC}44m`,
   magenta: `${ESC}45m`,
+  brightBlack: `${ESC}100m`,
+  brightRed: `${ESC}101m`,
+  brightGreen: `${ESC}102m`,
+  brightYellow: `${ESC}103m`,
+  brightBlue: `${ESC}104m`,
+  brightMagenta: `${ESC}105m`,
+  brightCyan: `${ESC}106m`,
 }
 
 // Cursor
@@ -65,7 +74,7 @@ const CURSOR = {
 }
 
 // ─────────────────────────────────────────────────────────────
-// OVOGO ASCII art logo (block font)
+// OVOGO ASCII art logo — gradient-ready lines
 // ─────────────────────────────────────────────────────────────
 
 const LOGO_LINES = [
@@ -76,57 +85,28 @@ const LOGO_LINES = [
   ' ╚═════╝   ╚═══╝   ╚═════╝  ╚═════╝  ╚═════╝ ',
 ]
 
+// Gradient colors for logo (magenta → cyan → green)
+const LOGO_GRADIENT = [
+  FG.brightMagenta,
+  FG.magenta,
+  FG.brightBlue,
+  FG.brightCyan,
+  FG.brightGreen,
+]
+
 // ─────────────────────────────────────────────────────────────
 // Spinner frames (Braille Unicode)
 // ─────────────────────────────────────────────────────────────
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
-// Verbs for spinner animation
 export const SPINNER_VERBS = [
-  'Accomplishing',
-  'Architecting',
-  'Baking',
-  'Calculating',
-  'Cerebrating',
-  'Cogitating',
-  'Composing',
-  'Computing',
-  'Concocting',
-  'Considering',
-  'Crafting',
-  'Crunching',
-  'Crystallizing',
-  'Deliberating',
-  'Determining',
-  'Distilling',
-  'Elaborating',
-  'Engineering',
-  'Examining',
-  'Executing',
-  'Exploring',
-  'Figuring',
-  'Generating',
-  'Hatching',
-  'Implementing',
-  'Inferring',
-  'Initializing',
-  'Innovating',
-  'Mulling',
-  'Noodling',
-  'Orchestrating',
-  'Pondering',
-  'Processing',
-  'Reasoning',
-  'Ruminating',
-  'Sautéing',
-  'Scheming',
-  'Solving',
-  'Synthesizing',
-  'Thinking',
-  'Transmuting',
-  'Vibing',
-  'Wrangling',
+  'Analyzing',   'Architecting',  'Computing',   'Crafting',
+  'Decoding',    'Deliberating',  'Engineering', 'Executing',
+  'Exploring',   'Generating',    'Hacking',     'Inferring',
+  'Mapping',     'Orchestrating', 'Pondering',   'Probing',
+  'Reasoning',   'Ruminating',    'Scanning',    'Synthesizing',
+  'Thinking',    'Vibing',        'Wrangling',
 ]
 
 // ─────────────────────────────────────────────────────────────
@@ -161,15 +141,16 @@ export function wrapText(text: string, width: number, indent = ''): string {
 // Stripe helpers — colored left-border per section type
 // ─────────────────────────────────────────────────────────────
 
-// Heavy vertical bar for emphasis sections
 const STRIPE = {
-  user: `${FG.brightBlue}│${RESET}`,
-  assistant: `${FG.brightCyan}│${RESET}`,
-  tool: `${FG.brightYellow}┃${RESET}`,
-  result: `${FG.brightGreen}│${RESET}`,
-  error: `${FG.brightRed}│${RESET}`,
-  agent: `${FG.brightMagenta}│${RESET}`,
-  compact: `${FG.yellow}│${RESET}`,
+  user:     `${FG.brightBlue}│${RESET}`,
+  assistant:`${FG.brightCyan}│${RESET}`,
+  tool:     `${FG.brightYellow}┃${RESET}`,
+  result:   `${FG.brightGreen}│${RESET}`,
+  error:    `${FG.brightRed}│${RESET}`,
+  agent:    `${FG.brightMagenta}│${RESET}`,
+  compact:  `${FG.yellow}│${RESET}`,
+  info:     `${FG.brightBlack}│${RESET}`,
+  dispatch: `${FG.cyan}│${RESET}`,
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -185,9 +166,9 @@ export class Renderer {
   private termWidth: number
   private _assistantLineStarted = false
 
-  /** Instance-level write function — routes to stdout or a file stream */
+  /** Instance-level write function */
   private write: (s: string) => void
-  /** Whether the output stream is a real TTY (affects spinner, cursor codes) */
+  /** Whether the output stream is a real TTY */
   private isTTY: boolean
 
   constructor(options?: { stream?: NodeJS.WritableStream }) {
@@ -202,46 +183,74 @@ export class Renderer {
     }
   }
 
-  /**
-   * Create a renderer that writes to a log file.
-   * Ideal for sub-agent panes in tmux 4-grid layout.
-   * ANSI escape codes are preserved so tmux pane `tail -f` renders color.
-   */
   static forFile(filePath: string): Renderer {
     const fileStream = createWriteStream(filePath, { flags: 'a' }) as unknown as NodeJS.WritableStream
     return new Renderer({ stream: fileStream })
   }
 
-  // ── Banner ───────────────────────────────────────────────────
+  // ── Utility ──────────────────────────────────────────────────
+
+  private fullWidth(char: string, padding = 4): string {
+    const inner = Math.max(0, this.termWidth - padding)
+    return char.repeat(inner)
+  }
+
+  private thinBar(): string {
+    const inner = Math.min(this.termWidth - 6, 72)
+    return `${FG.brightBlack}─${'─'.repeat(inner)}─${RESET}`
+  }
+
+  private doubleBar(): string {
+    const inner = Math.min(this.termWidth - 6, 72)
+    return `${FG.brightBlack}═${'═'.repeat(inner)}═${RESET}`
+  }
+
+  // ── Banner — gradient ASCII art + info panel ─────────────────
 
   banner(version: string, model: string): void {
-    const barWidth = Math.min(this.termWidth - 4, 48)
-    const bar = `${FG.brightBlack}${'━'.repeat(barWidth)}${RESET}`
+    this.write('\n')
+
+    // Gradient logo lines
+    for (let i = 0; i < LOGO_LINES.length; i++) {
+      const color = LOGO_GRADIENT[i % LOGO_GRADIENT.length]
+      this.write(`  ${BOLD}${color}${LOGO_LINES[i]}${RESET}\n`)
+    }
 
     this.write('\n')
-    for (const line of LOGO_LINES) {
-      this.write(`  ${FG.brightMagenta}${BOLD}${line}${RESET}\n`)
-    }
-    this.write('\n')
+
+    // Top decorative line
+    const bar = this.doubleBar()
     this.write(`  ${bar}\n`)
+
+    // Info row
+    const info = [
+      `${DIM}version${RESET} ${BOLD}${FG.brightWhite}${version}${RESET}`,
+      `${DIM}model${RESET}   ${BOLD}${FG.brightCyan}${model}${RESET}`,
+      `${DIM}engine${RESET}  ${BOLD}${FG.brightGreen}Think-Act-Observe${RESET}`,
+      `${DIM}mode${RESET}    ${BOLD}${FG.brightYellow}Coordinator${RESET}`,
+    ]
+    this.write(`  ${info.join('  ')}\n`)
+    this.write(`  ${bar}\n`)
+
+    // Tagline
     this.write(
-      `  ${DIM}version${RESET} ${FG.brightWhite}${version}${RESET}` +
-        `   ${DIM}model${RESET} ${FG.brightCyan}${model}${RESET}\n`,
+      `  ${DIM}AI-Powered Red Team Coordination Engine — ` +
+      `${FG.brightMagenta}autonomous penetration testing${RESET}${DIM}${RESET}\n`,
     )
-    this.write(`  ${bar}\n`)
     this.write('\n')
   }
 
-  // ── Section separator — gradient style ───────────────────────
+  // ── Section separator ────────────────────────────────────────
 
   separator(): void {
-    const innerWidth = Math.min(this.termWidth - 10, 68)
-    const mid = `${DIM}${'─'.repeat(innerWidth)}${RESET}`
-    const cap = `${FG.brightBlack}▒${RESET}`
-    this.write(`\n  ${cap}${mid}${cap}\n`)
+    const inner = Math.min(this.termWidth - 8, 68)
+    const left = `${FG.brightBlack}◇${RESET}`
+    const right = `${FG.brightBlack}◇${RESET}`
+    const mid = `${DIM}${'·'.repeat(inner)}${RESET}`
+    this.write(`\n  ${left}${mid}${right}\n`)
   }
 
-  // ── Human message — blue framed box with stripe ──────────────
+  // ── Human message — framed box ──────────────────────────────
 
   humanPrompt(text: string): void {
     const innerWidth = Math.min(this.termWidth - 8, 72)
@@ -253,14 +262,14 @@ export class Renderer {
 
     const lines = text.split('\n')
     for (const line of lines) {
-      const content = `${FG.brightBlue}❯${RESET} ${BOLD}${FG.brightWhite}${line}${RESET}`
-      this.write(`  ${FG.brightBlue}│${RESET} ${content}\n`)
+      const content = `${BOLD}${FG.brightWhite}${line}${RESET}`
+      this.write(`  ${FG.brightBlue}│${RESET} ${FG.brightBlue}❯${RESET} ${content}\n`)
     }
 
     this.write(`  ${botBar}\n`)
   }
 
-  // ── Assistant text output (non-streaming) ────────────────────
+  // ── Assistant text output ───────────────────────────────────
 
   assistantText(text: string): void {
     const width = Math.min(this.termWidth - 8, 96)
@@ -271,7 +280,7 @@ export class Renderer {
     }
   }
 
-  // ── Streaming text output ────────────────────────────────────
+  // ── Streaming text output ───────────────────────────────────
 
   private streamingActive = false
 
@@ -289,7 +298,6 @@ export class Renderer {
       this.write(`  ${STRIPE.assistant} `)
       this._assistantLineStarted = true
     }
-    // After each newline, re-emit the left stripe prefix
     const indented = token.replace(/\n/g, `\n  ${STRIPE.assistant} `)
     this.write(indented)
   }
@@ -302,20 +310,22 @@ export class Renderer {
     }
   }
 
-  // ── Tool call display ─────────────────────────────────────────
-  // Yellow stripe for tool invocations, per-tool color for name
+  // ── Tool call display ───────────────────────────────────────
 
   toolStart(toolName: string, input: Record<string, unknown>): void {
     const preview = this.formatToolPreview(toolName, input)
     const nameColor = this.toolColor(toolName)
+    const icon = this.toolIcon(toolName)
+
     this.write(
-      `\n  ${STRIPE.tool}  ${BOLD}${nameColor}${toolName}${RESET}` +
+      `\n  ${STRIPE.tool}  ${icon} ${BOLD}${nameColor}${toolName}${RESET}` +
         `  ${FG.brightBlack}${preview}${RESET}\n`,
     )
   }
 
   toolResult(toolName: string, result: string, isError: boolean): void {
     const stripe = isError ? STRIPE.error : STRIPE.result
+    const icon = isError ? `${FG.brightRed}✗${RESET}` : `${FG.brightGreen}✓${RESET}`
     const maxPreview = 300
     const truncated =
       result.length > maxPreview
@@ -323,7 +333,7 @@ export class Renderer {
         : result
 
     if (isError) {
-      this.write(`  ${stripe}  ${FG.brightRed}${truncated}${RESET}\n`)
+      this.write(`  ${stripe}  ${icon}  ${FG.brightRed}${truncated}${RESET}\n`)
       return
     }
 
@@ -341,18 +351,54 @@ export class Renderer {
 
   private toolColor(name: string): string {
     const colors: Record<string, string> = {
-      Bash: FG.brightYellow,
-      Read: FG.brightCyan,
-      Write: FG.brightGreen,
-      Edit: FG.brightBlue,
-      Glob: FG.brightMagenta,
-      Grep: FG.brightMagenta,
-      WebFetch: FG.cyan,
-      WebSearch: FG.cyan,
-      TodoWrite: FG.brightGreen,
-      Agent: FG.brightMagenta,
+      Bash:              FG.brightYellow,
+      Read:              FG.brightCyan,
+      Write:             FG.brightGreen,
+      Edit:              FG.brightBlue,
+      Glob:              FG.brightMagenta,
+      Grep:              FG.brightMagenta,
+      WebFetch:          FG.cyan,
+      WebSearch:         FG.cyan,
+      TodoWrite:         FG.brightGreen,
+      Agent:             FG.brightMagenta,
+      MultiAgent:        FG.brightMagenta,
+      DispatchAgent:     FG.cyan,
+      CheckDispatch:     FG.cyan,
+      GetDispatchResult: FG.cyan,
+      FindingWrite:      FG.brightGreen,
+      FindingList:       FG.brightGreen,
+      WeaponRadar:       FG.brightYellow,
+      C2:                FG.brightRed,
+      ShellSession:      FG.brightRed,
+      TmuxSession:       FG.brightRed,
     }
     return colors[name] ?? FG.white
+  }
+
+  private toolIcon(name: string): string {
+    const icons: Record<string, string> = {
+      Bash:              `${FG.brightYellow}⌘${RESET}`,
+      Read:              `${FG.brightCyan}◈${RESET}`,
+      Write:             `${FG.brightGreen}◈${RESET}`,
+      Edit:              `${FG.brightBlue}◈${RESET}`,
+      Glob:              `${FG.brightMagenta}◇${RESET}`,
+      Grep:              `${FG.brightMagenta}◇${RESET}`,
+      WebFetch:          `${FG.cyan}◎${RESET}`,
+      WebSearch:         `${FG.cyan}◎${RESET}`,
+      TodoWrite:         `${FG.brightGreen}☐${RESET}`,
+      Agent:             `${FG.brightMagenta}⎇${RESET}`,
+      MultiAgent:        `${FG.brightMagenta}⎈${RESET}`,
+      DispatchAgent:     `${FG.cyan}⇢${RESET}`,
+      CheckDispatch:     `${FG.cyan}⇠${RESET}`,
+      GetDispatchResult: `${FG.cyan}⇤${RESET}`,
+      FindingWrite:      `${FG.brightGreen}⚑${RESET}`,
+      FindingList:       `${FG.brightGreen}⚑${RESET}`,
+      WeaponRadar:       `${FG.brightYellow}⚔${RESET}`,
+      C2:                `${FG.brightRed}⚡${RESET}`,
+      ShellSession:      `${FG.brightRed}⌁${RESET}`,
+      TmuxSession:       `${FG.brightRed}⌁${RESET}`,
+    }
+    return icons[name] ?? `${FG.white}·${RESET}`
   }
 
   private formatToolPreview(toolName: string, input: Record<string, unknown>): string {
@@ -387,12 +433,34 @@ export class Renderer {
         const glob = input.glob ? ` [${input.glob}]` : ''
         return `/${pattern}/${glob}`
       }
+      case 'Agent': {
+        const type = input.subagent_type ? String(input.subagent_type) : ''
+        const desc = input.description ? String(input.description) : ''
+        return type ? `[${type}] ${desc}` : desc
+      }
+      case 'MultiAgent': {
+        const agents = input.agents
+        if (Array.isArray(agents)) {
+          const types = agents
+            .filter((a: any) => a && typeof a === 'object')
+            .map((a: any) => a.subagent_type ?? 'unknown')
+            .join(', ')
+          return `×${agents.length} agents: ${types}`
+        }
+        return ''
+      }
+      case 'WeaponRadar': {
+        const q = input.query ?? input.queries
+        if (Array.isArray(q)) return `${q.length} queries`
+        if (q) return `"${String(q).slice(0, 50)}"`
+        return ''
+      }
       default:
         return JSON.stringify(input).slice(0, 80)
     }
   }
 
-  // ── Spinner ───────────────────────────────────────────────────
+  // ── Spinner ──────────────────────────────────────────────────
 
   startSpinner(initialVerb?: string): void {
     if (!this.isTTY) return
@@ -426,7 +494,7 @@ export class Renderer {
     const frame = SPINNER_FRAMES[this.spinnerFrame]
     const verb = SPINNER_VERBS[this.spinnerVerbIndex]
     const line =
-      `  ${FG.brightMagenta}${frame}${RESET} ` +
+      `  ${FG.brightMagenta}${BOLD}${frame}${RESET} ` +
       `${FG.brightBlack}${verb}${RESET}${FG.brightBlack}…${RESET}`
     this.write(CURSOR.col(1) + CURSOR.clearToEnd + line)
     this.lastSpinnerLineLen = line.replace(/\x1b\[[^m]*m/g, '').length
@@ -442,29 +510,31 @@ export class Renderer {
     this.lastSpinnerLineLen = 0
   }
 
-  // ── Status / info messages ────────────────────────────────────
+  // ── Status / info messages ──────────────────────────────────
 
   info(msg: string): void {
-    this.write(`  ${DIM}${msg}${RESET}\n`)
+    this.write(`  ${FG.brightBlack}·${RESET}  ${DIM}${msg}${RESET}\n`)
   }
 
   success(msg: string): void {
-    this.write(`  ${FG.brightGreen}✓${RESET} ${msg}\n`)
+    this.write(`  ${FG.brightGreen}✓${RESET} ${FG.brightGreen}${msg}${RESET}\n`)
   }
 
   error(msg: string): void {
-    this.write(`  ${FG.brightRed}✗${RESET} ${FG.red}${msg}${RESET}\n`)
+    this.write(`  ${FG.brightRed}✗${RESET} ${FG.brightRed}${msg}${RESET}\n`)
   }
 
   warn(msg: string): void {
-    this.write(`  ${FG.yellow}⚠${RESET} ${FG.yellow}${msg}${RESET}\n`)
+    this.write(`  ${FG.brightYellow}⚠${RESET} ${FG.brightYellow}${msg}${RESET}\n`)
   }
 
-  // ── Sub-agent display ─────────────────────────────────────────
+  // ── Sub-agent display ───────────────────────────────────────
 
   agentStart(description: string, agentType = 'general-purpose'): void {
-    const typeLabel = agentType !== 'general-purpose' ? `  ${FG.brightBlack}[${agentType}]${RESET}` : ''
-    this.write(`\n  ${STRIPE.agent}  ${BOLD}${FG.brightMagenta}⎇ Agent${RESET}${typeLabel}  ${DIM}${description}${RESET}\n`)
+    const typeLabel = agentType !== 'general-purpose'
+      ? `  ${DIM}[${FG.brightMagenta}${agentType}${RESET}${DIM}]${RESET}`
+      : ''
+    this.write(`\n  ${STRIPE.agent}  ${BOLD}${FG.brightMagenta}⎇${RESET}${BOLD}${FG.brightMagenta} Agent${RESET}${typeLabel}  ${DIM}${description}${RESET}\n`)
   }
 
   agentDone(description: string, success: boolean): void {
@@ -472,11 +542,6 @@ export class Renderer {
     this.write(`  ${STRIPE.agent}  ${icon} ${DIM}Agent "${description}" done${RESET}\n`)
   }
 
-  /**
-   * Print a brief summary of a completed sub-agent in the main terminal.
-   * Shows the first few lines of the agent's output so the user can see
-   * progress without switching to the tmux window.
-   */
   agentSummary(agentType: string, description: string, summary: string): void {
     const header = `  ${STRIPE.agent}  ${BOLD}${FG.brightMagenta}[${agentType}]${RESET} ${DIM}${description}${RESET}\n`
     const body = summary
@@ -486,10 +551,6 @@ export class Renderer {
     this.write(`${header}${body}\n`)
   }
 
-  /**
-   * Periodic heartbeat: show that a sub-agent is still running.
-   * Fires every 2 minutes so the user knows it hasn't hung silently.
-   */
   agentHeartbeat(agentType: string, description: string, elapsedSec: number): void {
     const mins = Math.floor(elapsedSec / 60)
     const secs = elapsedSec % 60
@@ -499,22 +560,22 @@ export class Renderer {
     )
   }
 
-  /** Show plan mode banner before a plan run */
+  // ── Plan mode banner ────────────────────────────────────────
+
   planModeStart(): void {
+    const bar = this.thinBar()
+    this.write(`\n  ${bar}\n`)
     this.write(
-      `\n  ${FG.brightBlue}┌${'─'.repeat(50)}┐${RESET}\n` +
-      `  ${FG.brightBlue}│${RESET}  ${BOLD}${FG.brightCyan}✦ PLAN MODE${RESET}  ${DIM}(read-only analysis)${RESET}` +
-      `${' '.repeat(17)}${FG.brightBlue}│${RESET}\n` +
-      `  ${FG.brightBlue}└${'─'.repeat(50)}┘${RESET}\n`,
+      `  ${FG.brightBlue}◇${RESET}  ${BOLD}${FG.brightCyan}✦ PLAN MODE${RESET}  ${DIM}(read-only analysis)${RESET}\n`
     )
+    this.write(`  ${bar}\n`)
   }
 
-  /** Ask the user to confirm plan execution, returns the raw line */
   planConfirmPrompt(): void {
     this.write(`\n  ${FG.brightYellow}?${RESET} Proceed with execution? ${DIM}[y/N]${RESET} `)
   }
 
-  // ── Compact notifications ─────────────────────────────────────
+  // ── Compact notifications ───────────────────────────────────
 
   compactStart(tokenCount: number): void {
     this.write(
@@ -531,24 +592,16 @@ export class Renderer {
     )
   }
 
-  // ── Context stats (percentage-based) ─────────────────────────
+  // ── Context stats ───────────────────────────────────────────
 
-  /**
-   * Display a warning bar when context usage exceeds the warn threshold.
-   * Inspired by the reference implementation's autoCompact warning display.
-   */
   contextWarning(tokens: number, maxTokens: number, pct: number): void {
     const pctStr = Math.round(pct * 100)
     this.write(
-      `\n  ${STRIPE.compact}  ${FG.yellow}⚠${RESET}` +
+      `\n  ${STRIPE.compact}  ${FG.brightYellow}⚠${RESET}` +
         `  ${DIM}上下文 ${pctStr}% · ~${Math.round(tokens / 1000)}k / ${Math.round(maxTokens / 1000)}k tokens — 接近压缩阈值${RESET}\n`,
     )
   }
 
-  /**
-   * Periodic token-usage status line shown every N iterations.
-   * Keeps the operator informed without flooding the terminal.
-   */
   contextStats(tokens: number, maxTokens: number, pct: number): void {
     const pctInt = Math.round(pct * 100)
     const filled = Math.round(pct * 16)
@@ -559,27 +612,42 @@ export class Renderer {
     )
   }
 
-  // ── Turn stats ────────────────────────────────────────────────
+  // ── Turn stats ──────────────────────────────────────────────
 
   turnStats(iterations: number, model: string): void {
-    this.write(`\n  ${DIM}↩ ${iterations} turn${iterations !== 1 ? 's' : ''} · ${model}${RESET}\n`)
+    this.write(`\n  ${DIM}↻ ${iterations} turn${iterations !== 1 ? 's' : ''} · ${model}${RESET}\n`)
   }
 
-  // ── Input prompt ──────────────────────────────────────────────
+  // ── Dispatch display ────────────────────────────────────────
+
+  dispatchStarted(id: string, agentType: string, description: string): void {
+    this.write(
+      `\n  ${STRIPE.dispatch}  ${FG.cyan}⇢${RESET} ${BOLD}${FG.brightCyan}Dispatch${RESET}` +
+        `  ${DIM}[${agentType}]${RESET} ${FG.brightWhite}${description}${RESET}` +
+        `  ${DIM}id: ${id}${RESET}\n`,
+    )
+  }
+
+  dispatchCompleted(id: string, success: boolean): void {
+    const icon = success ? `${FG.brightGreen}✓${RESET}` : `${FG.brightRed}✗${RESET}`
+    this.write(`  ${STRIPE.dispatch}  ${icon} ${DIM}Dispatch ${id} ${success ? 'completed' : 'failed'}${RESET}\n`)
+  }
+
+  // ── Input prompt ────────────────────────────────────────────
 
   writePrompt(): void {
-    this.write(`\n${FG.brightBlue}❯${RESET} `)
+    this.write(`\n${FG.brightBlue}◇${RESET} ${BOLD}${FG.brightWhite}ovogo${RESET}${DIM} › ${RESET}`)
   }
 
   writeInterruptPrompt(): void {
-    // \x07 = BEL — terminal bell to alert user
+    const bar = this.fullWidth('─')
     this.write(
-      `\x07\n` +
-      `${FG.brightYellow}${'─'.repeat(60)}${RESET}\n` +
-      `${FG.brightYellow}  ⚡ 任务已暂停${RESET}  ${BOLD}输入建议后按 Enter 注入并继续${RESET}\n` +
-      `${DIM}  直接按 Enter = 静默恢复  |  Ctrl+D = 终止${RESET}\n` +
-      `${FG.brightYellow}${'─'.repeat(60)}${RESET}\n` +
-      `${FG.brightYellow}▶${RESET} `,
+      `\n\x07` +
+      `  ${FG.brightYellow}╭${bar}╮${RESET}\n` +
+      `  ${FG.brightYellow}│${RESET}  ${FG.brightYellow}${BOLD}⚡ 任务已暂停${RESET}  ${DIM}输入建议后按 Enter 注入并继续${RESET}  ${FG.brightYellow}│${RESET}\n` +
+      `  ${FG.brightYellow}│${RESET}  ${DIM}直接按 Enter = 静默恢复  |  Ctrl+D = 终止${RESET}  ${FG.brightYellow}│${RESET}\n` +
+      `  ${FG.brightYellow}╰${bar}╯${RESET}\n` +
+      `${FG.brightYellow}◇${RESET} `,
     )
   }
 
