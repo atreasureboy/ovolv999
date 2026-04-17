@@ -13,6 +13,7 @@
 import OpenAI from 'openai'
 import type { Renderer } from '../ui/renderer.js'
 import type { ExecutionEngine } from './engine.js'
+import { AsyncTaskScheduler } from './taskScheduler.js'
 
 // ─── Phase definitions ──────────────────────────────────────────────────────
 
@@ -286,6 +287,7 @@ export class BattleOrchestrator {
   private engine: ExecutionEngine
   private phaseMachine = new PhaseMachine()
   private taskDAG = new TaskDAG()
+  private scheduler: AsyncTaskScheduler
   private client: OpenAI
   private maxCycles: number
   private cycleCount = 0
@@ -295,6 +297,7 @@ export class BattleOrchestrator {
     this.renderer = renderer
     this.engine = engine
     this.maxCycles = maxCycles
+    this.scheduler = new AsyncTaskScheduler(engine)
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
@@ -303,7 +306,7 @@ export class BattleOrchestrator {
 
   /** Run the full orchestrated engagement */
   async run(initialPrompt: string): Promise<void> {
-    this.renderer.info(`[Orchestrator] 启动状态机引擎 — 目标: ${this.config.primaryTarget ?? initialPrompt.slice(0, 60)}`)
+    this.renderer.info(`[Orchestrator] 启动异步调度引擎 — 目标: ${this.config.primaryTarget ?? initialPrompt.slice(0, 60)}`)
 
     // Record initial task
     this.taskDAG.add({
@@ -320,51 +323,119 @@ export class BattleOrchestrator {
       this.cycleCount++
       this.renderer.info(`\n━━━ [周期 ${this.cycleCount}/${this.maxCycles}] ━━━`)
 
-      // Step 1: Supervisor decision
+      // Step 1: Harvest completed tasks from previous cycle
+      const completions = await this.scheduler.pollCompleted()
+      for (const c of completions) {
+        this.taskDAG.update(c.task.id, {
+          status: c.success ? 'completed' : 'failed',
+          result: c.output.slice(0, 500),
+          findings: c.findings,
+          completedAt: Date.now(),
+        })
+        this.extractFindings(c.task.id, c.output)
+      }
+      if (completions.length > 0) {
+        this.renderer.info(`[Scheduler] ${completions.length} 个任务完成`)
+        for (const c of completions) {
+          const icon = c.success ? '✅' : '❌'
+          this.renderer.info(`  ${icon} ${c.task.agentType}: ${c.output.slice(0, 100)}...`)
+        }
+      }
+
+      // Step 2: Tick scheduler to launch eligible pending tasks
+      if (!this.scheduler.isIdle) {
+        const tick = await this.scheduler.tick()
+        if (tick.launched > 0) {
+          this.renderer.info(`[Scheduler] 启动 ${tick.launched} 个新任务`)
+        }
+      }
+
+      // Step 3: Supervisor decides what to do next
       const decision = await this.supervisorDecide()
-      if (!decision) {
+
+      if (decision) {
+        this.renderer.info(`[Supervisor] ${decision.reasoning}`)
+        this.renderer.info(`[Supervisor] 下一阶段: ${decision.next_phase} (${PHASES[decision.next_phase]?.description ?? ''})`)
+
+        // Transition phase
+        this.phaseMachine.transition(decision.next_phase)
+
+        // Submit new dispatch requests to scheduler (non-blocking)
+        if (decision.dispatch.length > 0) {
+          const schedulerTasks = decision.dispatch.map((action) => {
+            const taskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+            this.taskDAG.add({
+              id: taskId,
+              type: action.agent_type,
+              phase: decision.next_phase,
+              status: 'dispatched',
+              dependsOn: [],
+              prompt: action.prompt,
+              findings: 0,
+              startedAt: Date.now(),
+            })
+            return {
+              id: taskId,
+              agentType: action.agent_type,
+              prompt: action.prompt,
+              priority: action.priority,
+              phase: decision.next_phase,
+              dependsOn: [],
+            }
+          })
+
+          this.scheduler.submit(schedulerTasks)
+
+          // Tick to immediately launch eligible tasks
+          const tick = await this.scheduler.tick()
+          if (tick.launched > 0) {
+            this.renderer.info(`[Scheduler] 启动 ${tick.launched} 个任务`)
+          }
+          for (const action of decision.dispatch) {
+            this.renderer.info(`  [提交] ${action.agent_type} (${action.priority}): ${action.prompt.slice(0, 100)}...`)
+          }
+        }
+      } else if (this.scheduler.isIdle) {
         this.renderer.info('[Orchestrator] 无更多行动，任务完成')
         this.phaseMachine.transition('done')
         break
       }
-
-      this.renderer.info(`[Supervisor] ${decision.reasoning}`)
-      this.renderer.info(`[Supervisor] 下一阶段: ${decision.next_phase} (${PHASES[decision.next_phase]?.description ?? ''})`)
-
-      // Step 2: Execute dispatch
-      if (decision.dispatch.length === 0) {
-        this.renderer.info('[Supervisor] 等待当前 agent 完成...')
-        // In current architecture, engine handles waiting. Just continue loop.
-        continue
-      }
-
-      for (const action of decision.dispatch) {
-        this.renderer.info(`  [Dispatch] ${action.agent_type} (${action.priority}): ${action.prompt.slice(0, 100)}...`)
-      }
-
-      // Step 3: Dispatch agents via engine
-      await this.dispatchAgents(decision)
 
       // Step 4: Check if we should continue
       if (this.phaseMachine.current === 'done') {
         this.renderer.success('[Orchestrator] 任务完成')
         break
       }
+
+      // If there are running tasks but no new dispatch, wait a bit
+      if (!this.scheduler.isIdle && decision?.dispatch.length === 0) {
+        this.renderer.info('[Scheduler] 等待后台任务完成...')
+        // Brief pause to let background tasks progress
+        await this.sleep(2000)
+      }
     }
 
     this.renderFinalSummary()
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
   }
 
   /** LLM supervisor decides what to do next */
   private async supervisorDecide(): Promise<SupervisorDecision | null> {
     const stateSummary = this.phaseMachine.toSummary()
     const taskSummary = this.taskDAG.toSummary()
+    const schedulerSummary = this.scheduler.toSummary()
     const allowedNext = this.phaseMachine.allowedNext()
     const roePrompt = this.buildRoEPrompt()
 
     const userPrompt = [
       `## 当前状态`,
       stateSummary,
+      '',
+      `## 调度器状态`,
+      schedulerSummary,
       '',
       `## 任务执行记录`,
       taskSummary,
@@ -464,66 +535,6 @@ export class BattleOrchestrator {
     }
 
     return null
-  }
-
-  /** Dispatch agents based on supervisor decision */
-  private async dispatchAgents(decision: SupervisorDecision): Promise<void> {
-    // Transition phase
-    this.phaseMachine.transition(decision.next_phase)
-
-    // For each dispatch action, create a task and dispatch
-    for (const action of decision.dispatch) {
-      const task = this.taskDAG.add({
-        type: action.agent_type,
-        phase: decision.next_phase,
-        status: 'dispatched',
-        dependsOn: [],
-        prompt: action.prompt,
-        findings: 0,
-        startedAt: Date.now(),
-      })
-
-      // Build the full system prompt for the sub-agent
-      const systemPrompt = this.buildAgentPrompt(action)
-
-      try {
-        // Use the engine to run this agent turn
-        const { result } = await this.engine.runTurn(systemPrompt, [])
-
-        // Update task with result
-        this.taskDAG.update(task.id, {
-          status: result.stopped ? 'completed' : 'failed',
-          result: result.output.slice(0, 500),
-          completedAt: Date.now(),
-        })
-
-        // Extract findings from result
-        this.extractFindings(task.id, result.output)
-      } catch (err: unknown) {
-        this.taskDAG.update(task.id, {
-          status: 'failed',
-          result: (err as Error).message.slice(0, 300),
-          completedAt: Date.now(),
-        })
-      }
-    }
-  }
-
-  /** Build system prompt for a dispatched agent */
-  private buildAgentPrompt(action: { agent_type: string; prompt: string }): string {
-    const parts: string[] = [
-      `你是 Ovogo 红队子 agent，专项类型: ${action.agent_type}。`,
-      ``,
-      `## 任务`,
-      action.prompt,
-      ``,
-      `## 约束`,
-      `- 所有输出文件写入: ${this.config.sessionDir}/`,
-      `- 目标: ${this.config.primaryTarget ?? '未知'}`,
-      ``,
-      this.buildRoEPrompt(),
-    ]
-    return parts.join('\n')
   }
 
   /** Build RoE constraint prompt from engagement context */
