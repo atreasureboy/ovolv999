@@ -648,7 +648,7 @@ export class ExecutionEngine {
         messages.push(assistantMsg)
 
         if (finishReason === 'stop' || rawToolCalls.length === 0) {
-          this.extractSessionKnowledge(messages)
+          this.extractSessionKnowledge()
           return {
             result: { stopped: true, reason: 'stop_sequence', output: finalOutput },
             newHistory: messages,
@@ -752,7 +752,7 @@ export class ExecutionEngine {
     }
 
     this.renderer.warn(`Max iterations (${this.config.maxIterations}) reached`)
-    this.extractSessionKnowledge(messages)
+    this.extractSessionKnowledge()
     return {
       result: { stopped: true, reason: 'max_iterations', output: finalOutput },
       newHistory: messages,
@@ -760,14 +760,11 @@ export class ExecutionEngine {
   }
 
   /** Session-end knowledge extraction (best-effort, never throws) */
-  private extractSessionKnowledge(messages: OpenAIMessage[]): void {
+  private extractSessionKnowledge(): void {
     if (!this.knowledgeExtractor || !this.eventLog) return
     try {
       const events = this.eventLog.readAll()
-      this.knowledgeExtractor.extractAttackChains(events)
-      this.knowledgeExtractor.extractToolCombos(events)
-      this.knowledgeExtractor.extractTargetProfile(events)
-      this.knowledgeExtractor.extractFromSession()
+      this.knowledgeExtractor.extractFromSession(events)
     } catch { /* best-effort — knowledge extraction must never break the engine */ }
   }
 

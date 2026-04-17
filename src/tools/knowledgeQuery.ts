@@ -56,7 +56,7 @@ export class KnowledgeQueryTool implements Tool {
     for (const t of types) {
       const entries = this.kb.search(t, { keywords: [query], limit })
       if (entries.length > 0) {
-        results.push(`## ${t}\n${this.kb.toPrompt(entries)}`)
+        results.push(this.kb.toPrompt(entries))
       }
     }
 

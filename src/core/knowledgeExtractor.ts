@@ -115,22 +115,21 @@ export class KnowledgeExtractor {
 
   /**
    * Session-end extraction — called when a session completes.
-   * Extracts attack patterns, tool combos, target profiles from full session data.
+   * Extracts attack patterns, tool combos, target profiles from EventLog
+   * and internal tool call sequence.
    */
-  extractFromSession(): void {
-    // Extract attack patterns from the tool call sequence
-    if (this.attackChainSteps.length >= 3) {
+  extractFromSession(events: EventLogEntry[]): void {
+    // Extract from full event log
+    this.extractAttackChains(events)
+    this.extractToolCombos(events)
+    this.extractTargetProfile(events)
+
+    // Extract from real-time tool call sequence (accumulated during session)
+    if (this.attackChainSteps.length >= 2) {
       this._extractAttackPattern()
     }
-
-    // Extract tool combos from tool call sequence
     if (this.toolCallSequence.length > 0) {
       this._extractToolCombos()
-    }
-
-    // Extract target profile
-    if (this.detectedTargetType !== 'unknown') {
-      this._extractTargetProfile()
     }
   }
 
@@ -247,7 +246,8 @@ export class KnowledgeExtractor {
   }
 
   private _detectTargetType(text: string): void {
-    if (text === this.detectedTargetType) return
+    // Lock in first detected type (best-effort, no re-detection needed)
+    if (this.detectedTargetType !== 'unknown') return
 
     const typePatterns: Record<string, RegExp[]> = {
       'Spring Boot': [/actuator/, /\/env/, /heapdump/, /spring\.cloud/],
@@ -376,10 +376,6 @@ export class KnowledgeExtractor {
         success_rate: this.shellAcquired ? 0.8 : 0.5,
       })
     }
-  }
-
-  private _extractTargetProfile(): void {
-    // Already handled by extractTargetProfile(events) — skip duplicate
   }
 
   private _extractTechniques(events: EventLogEntry[]): string[] {
