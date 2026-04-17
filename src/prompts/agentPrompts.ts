@@ -89,6 +89,65 @@ Go 安全工具绝对路径：
 - ffuf     → ffuf
 `.trim()
 
+/**
+ * 攻击知识库速查引用 — 附加到关键子 agent 的 prompt 中。
+ * 主 agent 的 system prompt 中已有完整版（通过 getAttackKnowledgeSection），
+ * 这里提供子 agent 的速查版本。
+ */
+const ATTACK_KB_REF = `
+
+## 攻击速查知识库 (Attack Quick Reference)
+
+### 红旗信号（发现即深入利用）
+- **6379/11211/27017/9200 端口** → 未授权数据库访问
+- **/actuator/** → Spring Boot 信息泄露 → heapdump → 密码
+- **/.env** → 数据库/API 密码
+- **/.git/** → 代码泄露 → git-dumper → 密码
+- **X-Forwarded-Host** → SSRF / Host 头注入
+- **JWT token** → jwt_tool 测试
+- **Apache 2.4.49/2.4.50** → CVE-2021-41773
+- **ThinkPHP** → RCE
+- **Shiro RememberMe** → 反序列化
+- **Jenkins /console** → Script Console RCE
+- **Docker Socket** → 容器逃逸
+- **phpMyAdmin 暴露** → 弱密码 → RCE
+
+### Web 攻击向量
+- **API 注入** — IDOR (改 ID)、Mass Assignment (注入 admin=true)、GraphQL 内省
+- **JWT 攻击** — 算法替换 (RS256→HS256)、None 算法
+- **认证绕过** — SQL 注入登录、2FA 绕过、OAuth redirect_uri 劫持
+- **文件上传绕过** — 双扩展名 (.php.jpg)、MIME 绕过、.htaccess 注入
+- **SSRF 链** — 内网 Redis (Gopher) → 写 crontab/webshell、云元数据 (169.254.169.254)
+- **SSTI** — {{7*7}} → 49 (Jinja2)、\${7*7} (Spring EL)、<#assign> (Freemarker)
+- **反序列化** — Java (ysoserial)、Python (pickle)、PHP (PHPGGC)
+
+### 数据库攻击
+- **Redis** — 未授权 → 写 SSH key / crontab / webshell
+- **MongoDB** — 默认 27017 无认证 → 读取数据
+- **MySQL** — root 空密码 → INTO OUTFILE 写 webshell → UDF 提权
+- **PostgreSQL** — COPY FROM PROGRAM 执行命令
+- **Elasticsearch** — 9200 未授权 → RCE (旧版本)
+
+### 内网 & AD 攻击
+- **Kerberoasting** — impacket-GetUserSPNs → hashcat 破解 TGS
+- **AS-REP Roasting** — impacket-GetNPUsers → 无预认证账户
+- **Pass-the-Hash** — impacket-psexec/wmiexec -hashes
+- **NTLM Relay** — responder + impacket-ntlmrelayx
+- **DCSync** — impacket-secretsdump -just-dc
+- **BloodHound** — 找最短路径到 Domain Admin
+
+### 云原生攻击
+- **Docker** — /var/run/docker.sock → 特权容器 → mount /:/host
+- **K8s** — API 未授权 → 创建 pod → ServiceAccount token
+- **CI/CD** — Jenkins Script Console → RCE
+
+### 超时/连接失败处理
+- ETIMEDOUT → 端口可能不可达或被防火墙拦截，不要无限重试
+- Connection refused → 服务未运行在该端口
+- WAF 拦截 → 降低速率 (-T2)、分段扫描、换工具
+- 子 agent 超时 → 标记目标不可达，继续处理已获得的结果
+- 部分成功 → 继续处理已有结果，不阻塞整体进度`
+
 export function getRedTeamAgentPrompt(type: RedTeamAgentType, cwd: string): string {
   const base = `工作目录: ${cwd}\n\n`
 
@@ -246,7 +305,7 @@ ${AGENT_TOOL_PATHS}
 
 ## 规则
 - 不调用 Agent 工具
-- 不直接攻击，只收集情报`
+- 不直接攻击，只收集情报${ATTACK_KB_REF}`
 
     // ═══════════════════════════════════════════════════════════════════
     // 漏洞检索阶段
@@ -385,7 +444,7 @@ ${AGENT_TOOL_PATHS}
 ## 规则
 - 不调用 Agent 工具
 - nuclei 全模板扫描必须后台运行，绝不前台阻塞
-- 禁止使用相对模板路径（用 -id 或绝对路径）`
+- 禁止使用相对模板路径（用 -id 或绝对路径）${ATTACK_KB_REF}`
 
     case 'service-vuln':
       return base + `你是服务/网络层漏洞扫描专家。对非 HTTP 服务执行漏洞扫描，包括 SMB/FTP/SSH/数据库/RPC 等。
@@ -632,7 +691,7 @@ poc_code是漏洞原理参考，不是nuclei模板。正确做法：
 - 不调用 Agent 工具
 - 优先手动curl/python，精准打击
 - 每个可利用漏洞必须尝试到底
-- 已知CVE优先使用上面的模板，不要从零构造`
+- 已知CVE优先使用上面的模板，不要从零构造${ATTACK_KB_REF}`
 
     case 'tool-exploit':
       return base + `你是工具漏洞利用专家。使用Metasploit/sqlmap/专用exploit工具自动化利用漏洞。
@@ -697,7 +756,7 @@ Bash({ command: "sqlmap -u 'URL' --os-shell --batch --os-cmd='cat /flag'" })
 ## 规则
 - 不调用 Agent 工具
 - msfconsole必须用TmuxSession管理
-- 优先使用已知exploit模块`
+- 优先使用已知exploit模块${ATTACK_KB_REF}`
 
     // ═══════════════════════════════════════════════════════════════════
     // C2阶段（与漏洞利用同时启动）
@@ -824,7 +883,7 @@ crontab -l; cat /etc/cron.d/* 2>/dev/null
 ## 规则
 - 不调用 Agent 工具
 - 优先使用 ShellSession exec 发命令
-- 信息收集要全面，不遗漏`
+- 信息收集要全面，不遗漏${ATTACK_KB_REF}`
 
     case 'privesc':
       return base + `你是权限提升专家。在已获得低权限 shell 后，提升到 root/SYSTEM。覆盖 Linux 和 Windows 平台。
@@ -878,7 +937,7 @@ ShellSession({ action: "exec", session_id: "shell_4444",
 
 ## 规则
 - 不调用 Agent 工具
-- 通过webshell或反弹shell执行`
+- 通过webshell或反弹shell执行${ATTACK_KB_REF}`
 
     // ═══════════════════════════════════════════════════════════════════
     // 内网横移阶段
@@ -1022,7 +1081,7 @@ proxychains impacket-ntlmrelayx -t smb://INTERNAL_HOST -smb2support
 - 不调用 Agent 工具
 - 所有连接命令加 proxychains 前缀
 - 每次横向成功立即 FindingWrite
-- AD 环境优先使用 impacket 工具包`
+- AD 环境优先使用 impacket 工具包${ATTACK_KB_REF}`
 
     // ═══════════════════════════════════════════════════════════════════
     // Flag收集阶段
@@ -1136,6 +1195,6 @@ sudo cat /root/flag* 2>/dev/null
 2. curl 一条命令验证（grep 响应特征）
 3. 验证成功 → 立即利用（RCE/SQLi/上传/绕过）+ 找 flag
 
-可用工具: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSearch, FindingWrite, FindingList, WeaponRadar, C2, ShellSession, TmuxSession.`
+可用工具: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSearch, FindingWrite, FindingList, WeaponRadar, C2, ShellSession, TmuxSession.${ATTACK_KB_REF}`
   }
 }

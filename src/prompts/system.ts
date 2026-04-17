@@ -13,6 +13,7 @@ import { platform, release, type as osType } from 'os'
 import type { OvogoMdFile } from '../config/ovogomd.js'
 import { formatOvogoMdForPrompt } from '../config/ovogomd.js'
 import type { EngagementScope } from '../config/settings.js'
+import { getAttackKnowledgeSection } from './attackKnowledge.js'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -482,6 +483,7 @@ export function getSystemPrompt(cwd: string, engagement?: EngagementScope, sessi
     getStartupProtocolSection(),
     getToolUsageSection(),
     getWeaponRadarSection(),
+    getAttackKnowledgeSection(),
     getInteractiveSection(),
     getMultiAgentSection(),
     getC2Section(),
