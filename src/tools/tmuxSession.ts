@@ -281,10 +281,8 @@ TmuxSession({ action: "capture", session: "msf", lines: 5 })  # 确认恢复到�
         // Full history
         output = await tmux(`capture-pane -t ${shellEsc(name)} -p -S -`)
       } else {
-        // Last N lines
-        const raw = await tmux(`capture-pane -t ${shellEsc(name)} -p -S -`)
-        const allLines = raw.split('\n')
-        output = allLines.slice(-lines).join('\n')
+        // Last N lines — capture only what we need (avoid pulling full history)
+        output = await tmux(`capture-pane -t ${shellEsc(name)} -p -S -${lines}`)
       }
 
       return {

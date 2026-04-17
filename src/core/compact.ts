@@ -10,6 +10,8 @@
 
 import OpenAI from 'openai'
 import type { OpenAIMessage } from './types.js'
+import { existsSync, readFileSync } from 'fs'
+import { join } from 'path'
 
 // Rough chars-per-token estimate (conservative — better to compact early)
 const CHARS_PER_TOKEN = 3.5
@@ -146,6 +148,70 @@ function extractSummary(text: string): string {
 }
 
 /**
+ * Read the current anchor store from the session directory.
+ * Returns a formatted string suitable for injecting into the system prompt,
+ * or null if no anchors exist.
+ */
+function readAnchorsAsPrompt(sessionDir?: string): string | null {
+  if (!sessionDir) return null
+  const anchorsPath = join(sessionDir, '.anchors.json')
+  if (!existsSync(anchorsPath)) return null
+
+  try {
+    const raw = readFileSync(anchorsPath, 'utf8')
+    const anchors = JSON.parse(raw) as {
+      ports?: Array<{ target: string; port: number; protocol: string; service?: string }>
+      cves?: Array<{ cve: string; target: string; score: number }>
+      creds?: Array<{ target: string; username?: string; credential: string; type: string }>
+      shells?: Array<{ id: string; target: string; user: string; privilege: string }>
+      flags?: Array<{ content: string; target: string; path: string }>
+    }
+
+    const lines: string[] = ['## 关键发现锚点（不可遗忘）']
+
+    if (anchors.ports && anchors.ports.length > 0) {
+      lines.push('### 已确认端口')
+      for (const p of anchors.ports.slice(-20)) {
+        lines.push(`- ${p.target}:${p.port}/${p.protocol}${p.service ? ` (${p.service})` : ''}`)
+      }
+    }
+
+    if (anchors.cves && anchors.cves.length > 0) {
+      lines.push('### 已确认漏洞')
+      for (const c of anchors.cves.slice(-20)) {
+        lines.push(`- ${c.cve} → ${c.target} (score: ${c.score}%)`)
+      }
+    }
+
+    if (anchors.creds && anchors.creds.length > 0) {
+      lines.push('### 已获取凭证')
+      for (const cr of anchors.creds.slice(-20)) {
+        lines.push(`- ${cr.target} | ${cr.username || '(unknown)'}:${cr.credential}`)
+      }
+    }
+
+    if (anchors.shells && anchors.shells.length > 0) {
+      lines.push('### 已控制 Shell')
+      for (const s of anchors.shells.slice(-10)) {
+        lines.push(`- ${s.id} @ ${s.target} (${s.privilege})`)
+      }
+    }
+
+    if (anchors.flags && anchors.flags.length > 0) {
+      lines.push('### 已捕获 Flag')
+      for (const f of anchors.flags.slice(-10)) {
+        lines.push(`- FLAG: ${f.content} (${f.path})`)
+      }
+    }
+
+    if (lines.length <= 1) return null
+    return lines.join('\n')
+  } catch {
+    return null
+  }
+}
+
+/**
  * Serialize messages to text for the summarization prompt.
  */
 function serializeMessages(messages: OpenAIMessage[]): string {
@@ -185,6 +251,7 @@ export async function maybeCompact(
   model: string,
   messages: OpenAIMessage[],
   threshold = COMPACT_THRESHOLD_TOKENS,
+  sessionDir?: string,
 ): Promise<CompactResult> {
   const originalTokens = estimateTokens(messages)
 
@@ -228,10 +295,13 @@ export async function maybeCompact(
     return { compacted: false, messages, summaryTokens: 0, originalTokens }
   }
 
-  // Build compacted history: summary message + recent verbatim messages
+  // Build compacted history: summary message + anchors + recent verbatim messages
+  const anchorContent = readAnchorsAsPrompt(sessionDir)
+  const summaryContent = `[CONVERSATION SUMMARY — previous context compacted]\n\n${summary}${anchorContent ? `\n\n---\n\n${anchorContent}` : ''}`
+
   const summaryMessage: OpenAIMessage = {
     role: 'user',
-    content: `[CONVERSATION SUMMARY — previous context compacted]\n\n${summary}`,
+    content: summaryContent,
   }
 
   const syntheticAssistantAck: OpenAIMessage = {

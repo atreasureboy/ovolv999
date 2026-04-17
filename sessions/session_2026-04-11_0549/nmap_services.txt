@@ -1,1 +1,0 @@
-# Nmap 7.94SVN scan initiated Sat Apr 11 05:52:13 2026 as: nmap -sV -p 1723,11910,19926,32440,42199,56430,58172 -oN /project/ovogogogo/sessions/session_2026-04-11_0549/nmap_services.txt zhhovo.top

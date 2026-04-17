@@ -253,15 +253,24 @@ ShellSession({ action: "exec", session_id: "shell_4444", command: "find / -perm 
       let done      = false
       let stabilize: ReturnType<typeof setTimeout> | null = null
       let firstByte: ReturnType<typeof setTimeout> | null = null
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null
 
-      const finish = () => {
+      // Unique end-of-command marker — appended after the real command.
+      // When we see this exact line in output, we know the command finished
+      // regardless of silence timeout.
+      const marker = `__EOC_${Date.now().toString(36)}__`
+
+      const finish = (reason: 'marker' | 'stabilize' | 'timeout' = 'stabilize') => {
         if (done) return
         done = true
         if (stabilize) clearTimeout(stabilize)
         if (firstByte) clearTimeout(firstByte)
+        if (timeoutTimer) clearTimeout(timeoutTimer)
         socket.removeListener('data', onData)
 
         let output = Buffer.concat(chunks).toString('utf8')
+        // Strip the echo'd command lines AND the end marker
+        output = output.replace(new RegExp(marker.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\r?\\n?', 'g'), '')
         output = stripEcho(output, command)
         output = stripPrompt(output)
 
@@ -271,23 +280,35 @@ ShellSession({ action: "exec", session_id: "shell_4444", command: "find / -perm 
       const onData = (chunk: Buffer) => {
         chunks.push(chunk)
         if (firstByte) { clearTimeout(firstByte); firstByte = null }
+
+        const text = chunk.toString('utf8')
+        if (text.includes(marker)) {
+          // Marker found → command definitely finished, collect remaining bytes briefly
+          if (stabilize) clearTimeout(stabilize)
+          stabilize = setTimeout(() => finish('marker'), 200)  // 200ms drain buffer
+          return
+        }
+
         // Reset stabilize timer — 400ms silence after last byte means done
         if (stabilize) clearTimeout(stabilize)
-        stabilize = setTimeout(finish, 400)
+        stabilize = setTimeout(() => finish('stabilize'), 400)
       }
 
       socket.on('data', onData)
 
-      // Hard timeout — give up if zero output in `timeout` ms
-      firstByte = setTimeout(finish, timeout)
-
-      socket.write(command + '\n', (err) => {
+      // Send command followed by the end-of-command marker on a new line.
+      // The marker lets us detect command completion without relying solely
+      // on silence timeout (which fails for slow commands).
+      socket.write(command + `\necho '${marker}'\n`, (err) => {
         if (err) {
           done = true
           socket.removeListener('data', onData)
           resolve({ content: `Write failed: ${err.message}`, isError: true })
         }
       })
+
+      // Hard timeout fallback — if marker never arrives
+      timeoutTimer = setTimeout(() => finish('timeout'), timeout)
     })
   }
 
@@ -348,6 +369,7 @@ export async function executeCommand(
   }
 
   const timeout = opts.timeout ?? 8_000
+  const marker = `__EOC_${Date.now().toString(36)}__`
 
   return new Promise((resolve) => {
     const socket = conn.socket!
@@ -355,15 +377,18 @@ export async function executeCommand(
     let done = false
     let stabilize: ReturnType<typeof setTimeout> | null = null
     let firstByte: ReturnType<typeof setTimeout> | null = null
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null
 
     const finish = () => {
       if (done) return
       done = true
       if (stabilize) clearTimeout(stabilize)
       if (firstByte) clearTimeout(firstByte)
+      if (timeoutTimer) clearTimeout(timeoutTimer)
       socket.removeListener('data', onData)
 
       let output = Buffer.concat(chunks).toString('utf8')
+      output = output.replace(new RegExp(marker.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '\\r?\\n?', 'g'), '')
       output = stripEcho(output, command)
       output = stripPrompt(output)
 
@@ -373,14 +398,22 @@ export async function executeCommand(
     const onData = (chunk: Buffer) => {
       chunks.push(chunk)
       if (firstByte) { clearTimeout(firstByte); firstByte = null }
+
+      const text = chunk.toString('utf8')
+      if (text.includes(marker)) {
+        if (stabilize) clearTimeout(stabilize)
+        stabilize = setTimeout(() => finish(), 200)
+        return
+      }
+
       if (stabilize) clearTimeout(stabilize)
-      stabilize = setTimeout(finish, 400)
+      stabilize = setTimeout(() => finish(), 400)
     }
 
     socket.on('data', onData)
-    firstByte = setTimeout(finish, timeout)
+    firstByte = setTimeout(() => finish(), timeout)
 
-    socket.write(command + '\n', (err) => {
+    socket.write(command + `\necho '${marker}'\n`, (err) => {
       if (err) {
         done = true
         socket.removeListener('data', onData)

@@ -32,7 +32,8 @@ import { ExecutionEngine } from '../src/core/engine.js'
 import { Renderer } from '../src/ui/renderer.js'
 import { InputHandler, readStdin } from '../src/ui/input.js'
 import type { EngineConfig, OpenAIMessage } from '../src/core/types.js'
-import { registerAgentFactory } from '../src/tools/agent.js'
+import { registerAgentFactory, setDispatchManager } from '../src/tools/agent.js'
+import { DispatchManager } from '../src/core/dispatch.js'
 import { loadMcpTools, disconnectAll } from '../src/services/mcp/loader.js'
 import type { ConnectedMcpClient } from '../src/services/mcp/client.js'
 import { loadSettings } from '../src/config/settings.js'
@@ -42,9 +43,12 @@ import type { Skill } from '../src/skills/loader.js'
 import { loadOvogoMd } from '../src/config/ovogomd.js'
 import { getMemoryDir, buildMemorySystemSection, getMemoryStats } from '../src/memory/index.js'
 import { buildFullSystemPrompt } from '../src/prompts/system.js'
-import { PriorityQueue } from '../src/core/priorityQueue.js'
 import { ProgressTracker } from '../src/core/progressTracker.js'
 import { ToolCache } from '../src/core/toolCache.js'
+import { EventLog } from '../src/core/eventLog.js'
+import { SemanticMemory } from '../src/core/semanticMemory.js'
+import { EpisodicMemory } from '../src/core/episodicMemory.js'
+import { ContextBudgetManager } from '../src/core/contextBudget.js'
 import { tmuxLayout } from '../src/ui/tmuxLayout.js'
 
 const VERSION = '0.1.0'
@@ -686,9 +690,34 @@ async function main(): Promise<void> {
   }
 
   // Initialize optimization components
-  const priorityQueue = new PriorityQueue()
   const progressTracker = new ProgressTracker()
   const toolCache = new ToolCache()
+
+  // ── New systems: Event Log, Memory, Context Budget, Dispatch ──
+  const eventLog = new EventLog(sessionDir)
+  renderer.info(`EventLog: ${eventLog.getFilePath()}`)
+
+  const projectSlug = cwd.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32)
+  const semanticMemory = new SemanticMemory(join(process.env.HOME ?? '', '.ovogo', 'projects', projectSlug))
+  const episodicMemory = new EpisodicMemory(join(process.env.HOME ?? '', '.ovogo', 'projects', projectSlug))
+
+  const maxCtxTokens = 200_000 // claude-sonnet-4-x default
+  const contextBudget = new ContextBudgetManager({
+    maxTokens: maxCtxTokens,
+    systemPrompt: 5_000,
+    memory: 8_000,
+    history: 80_000,
+    toolResults: 60_000,
+    reserved: 8_192,
+  })
+
+  const dispatchManager = new DispatchManager()
+  setDispatchManager(dispatchManager)
+
+  // Register dispatch completion callback — inject completed results into next turn
+  dispatchManager.onCompletion((record) => {
+    renderer.info(`[Dispatch] ${record.id} (${record.agentType}) → ${record.status}`)
+  })
 
   const config: EngineConfig = {
     model,
@@ -705,10 +734,15 @@ async function main(): Promise<void> {
     engagementTargets: engagement?.targets,
     outOfScopeTargets: engagement?.out_of_scope,
     engagementPhase: engagement?.phase,
-    priorityQueue,
     progressTracker,
     toolCache,
     coordinatorMode: true,
+    maxContextTokens: maxCtxTokens,
+    eventLog,
+    contextBudget,
+    dispatchManager,
+    semanticMemory,
+    episodicMemory,
   }
 
   // Plan-mode config: same system prompt + planMode=true (engine filters write tools)

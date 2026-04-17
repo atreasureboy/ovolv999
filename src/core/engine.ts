@@ -33,9 +33,10 @@ import { createTools, findTool, getToolDefinitions } from '../tools/index.js'
 import { getPlanModePrefix } from '../prompts/system.js'
 import type { Renderer } from '../ui/renderer.js'
 import { maybeCompact, calculateContextState, MODEL_MAX_CONTEXT_TOKENS } from './compact.js'
-import { PriorityQueue, ToolTask } from './priorityQueue.js'
 import { ProgressTracker } from './progressTracker.js'
 import { ToolCache } from './toolCache.js'
+import type { EventLogEntry } from './eventLog.js'
+import { ContextBudgetManager, CompressionStrategy } from './contextBudget.js'
 
 const MAX_TOOL_RESULT_LENGTH = 20_000
 
@@ -157,6 +158,8 @@ const PLAN_MODE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'
 const COORDINATOR_ALLOWED_TOOLS = new Set([
   // Delegation (core orchestrator tools)
   'Agent', 'MultiAgent',
+  // Async dispatch
+  'DispatchAgent', 'CheckDispatch', 'GetDispatchResult',
   // Intelligence / lookup (fast, no side effects)
   'WeaponRadar', 'WebSearch', 'WebFetch',
   // Reading sub-agent outputs and documents
@@ -165,6 +168,8 @@ const COORDINATOR_ALLOWED_TOOLS = new Set([
   'FindingWrite', 'FindingList', 'TodoWrite',
   // C2 coordination (get_ip, list_sessions, list_listeners — read-only actions)
   'C2',
+  // Bash — read-only commands only (whitelist enforced at execution time)
+  'Bash',
 ])
 
 /**
@@ -182,6 +187,54 @@ const PARALLEL_FIRST_AGENT_TYPES = new Set([
 const FORBIDDEN_COORDINATOR_AGENT_TYPES = new Set([
   'general-purpose', 'explore', 'plan', 'code-reviewer',
 ])
+
+/**
+ * Coordinator mode — Bash read-only command whitelist.
+ * The main agent needs these to monitor sub-agent progress via file inspection
+ * without being able to launch scans or exploits directly.
+ */
+const COORDINATOR_BASH_WHITELIST = [
+  // File reading / inspection
+  /^tail\b/, /^head\b/, /^cat\b/, /^wc\b/, /^less\b/, /^more\b/, /^bat\b/,
+  // Search
+  /^grep\b/, /^egrep\b/, /^fgrep\b/, /^zgrep\b/,
+  // Listing / filesystem
+  /^ls\b/, /^stat\b/, /^file\b/, /^du\b/, /^df\b/, /^find\b/, /^tree\b/,
+  // Process monitoring
+  /^ps\b/, /^top\b/, /^htop\b/, /^uptime\b/, /^free\b/,
+  // Identity / system info
+  /^whoami\b/, /^id\b/, /^hostname\b/, /^uname\b/, /^date\b/, /^who\b/, /^w\b/,
+  // Safe output
+  /^echo\b/, /^printf\b/, /^date\b/,
+  // Log / session monitoring
+  /^sed\s+.*-n\b/,  // sed -n is safe (no -i)
+  /^awk\b/,
+  // Sorting / filtering
+  /^sort\b/, /^uniq\b/, /^diff\b/, /^cmp\b/,
+  // Network info (read-only)
+  /^ss\b/, /^netstat\b/, /^ip\s+(addr|route|link|neigh)\b/,
+  // But block dangerous network commands
+]
+
+/** Regexes for commands the coordinator must NEVER run via Bash. */
+const COORDINATOR_BASH_BLACKLIST = [
+  /nmap\b/, /masscan\b/, /naabu\b/,        // port scanning
+  /nuclei\b/, /nikto\b/, /ffuf\b/,          // vuln scanning
+  /sqlmap\b/, /hydra\b/, /kerbrute\b/,      // exploitation / brute-force
+  /msfconsole\b/, /msfvenom\b/, /metasploit\b/,  // C2
+  /sliver\b/, /cobalt.*strike\b/,           // C2
+  /chisel\b/, /stowaway\b/, /proxychains\b/, /socat\b/, // tunneling
+  /curl.*(-o\s|-O\b|--output\b)/,           // curl downloading files
+  /wget\b/, /fetch\b/,                      // downloading
+  /chmod\b.*\+x/, /chown\b/,                // permission changes
+  /apt\s+install\b/, /apt-get\s+install\b/, // package installation
+  /go\s+install\b/,                         // Go tool installation
+  /pip\s+install\b/, /pip3\s+install\b/,   // Python package installation
+  /rm\b.*(-rf|-fr)/,                        // destructive deletion
+  /find\b.*(-exec\b.*-c\s|delete\b)/,       // find destructive operations
+  /\|\s*(bash|sh|zsh)\b/,                   // pipe to shell
+  /\beval\b/, /source\s/, /\. /,            // code evaluation
+]
 
 /**
  * Concurrency-safe tools: run in parallel within a single LLM response.
@@ -202,6 +255,7 @@ const CONCURRENCY_SAFE_TOOLS = new Set([
   'Bash',        // parallel — dependent ops should be chained with && in one call
   'Agent',       // parallel — multiple sub-agents run simultaneously via Promise.all
   'MultiAgent',  // parallel — internally uses Promise.all; safe to batch with others
+  'DispatchAgent', 'CheckDispatch', 'GetDispatchResult', // parallel — dispatch management
   'C2',          // parallel — deploy_listener / get_ip / list_sessions are safe
   'ShellSession', // parallel — listen / list / exec on different sessions
   'TmuxSession',  // parallel — new / list / capture on different sessions
@@ -251,12 +305,16 @@ export class ExecutionEngine {
   private currentTurnAbortController: AbortController | null = null
   /** Soft-interrupt flag: pause after current tool finishes, preserve history */
   private softAbortRequested = false
-  /** Priority queue for tool execution */
-  private priorityQueue: PriorityQueue
   /** Progress tracker for long-running tools */
   private progressTracker: ProgressTracker
   /** Cache for tool execution results */
   private toolCache: ToolCache
+  /** Event log — may be undefined if not configured */
+  private eventLog: EngineConfig['eventLog']
+  /** Context budget manager — may be undefined if not configured */
+  private contextBudget: EngineConfig['contextBudget']
+  /** Dispatch manager — may be undefined if not configured */
+  private dispatchManager: EngineConfig['dispatchManager']
 
   constructor(config: EngineConfig, renderer: Renderer) {
     this.config = config
@@ -266,9 +324,11 @@ export class ExecutionEngine {
       baseURL: config.baseURL,
     })
     this.tools = createTools(config.extraTools ?? [])
-    this.priorityQueue = config.priorityQueue || new PriorityQueue()
     this.progressTracker = config.progressTracker || new ProgressTracker()
     this.toolCache = config.toolCache || new ToolCache()
+    this.eventLog = config.eventLog
+    this.contextBudget = config.contextBudget
+    this.dispatchManager = config.dispatchManager
   }
 
   /**
@@ -350,6 +410,12 @@ export class ExecutionEngine {
         baseURL: this.config.baseURL,
         model: this.config.model,
       },
+      // Inject sessionDir for tools that need anchor updates
+      sessionDir: this.config.sessionDir,
+      // Inject new systems into tool context
+      eventLog: this.eventLog,
+      semanticMemory: this.config.semanticMemory,
+      episodicMemory: this.config.episodicMemory,
     }
 
     const messages: OpenAIMessage[] = [
@@ -393,10 +459,21 @@ export class ExecutionEngine {
         }
 
         // ── Context stats + auto-compact ────────────────────────
-        // Use percentage-based thresholds (ref: calculateTokenWarningState in
-        // reference implementation).  Mirrors 70% warn / 85% compact pattern.
         const maxCtxTokens = this.config.maxContextTokens ?? MODEL_MAX_CONTEXT_TOKENS
-        const ctxState = calculateContextState(messages, maxCtxTokens)
+
+        // Use ContextBudgetManager if available, else fall back to percentage-based thresholds
+        let ctxState: ReturnType<typeof calculateContextState> & { strategy?: CompressionStrategy }
+        if (this.contextBudget) {
+          const budgetState = this.contextBudget.evaluate(maxCtxTokens)
+          ctxState = {
+            ...calculateContextState(messages, maxCtxTokens),
+            strategy: budgetState.strategy,
+            shouldCompact: budgetState.shouldCompact,
+            shouldWarn: budgetState.shouldWarn,
+          }
+        } else {
+          ctxState = calculateContextState(messages, maxCtxTokens) as ReturnType<typeof calculateContextState> & { strategy?: CompressionStrategy }
+        }
 
         // Show context stats every 5 iterations (main agent only, not sub-agents)
         if (this.config.sessionDir && iterations % 5 === 0) {
@@ -405,11 +482,20 @@ export class ExecutionEngine {
 
         if (ctxState.shouldCompact) {
           this.renderer.compactStart(ctxState.currentTokens)
-          const compactResult = await maybeCompact(this.client, this.config.model, messages)
+          this.eventLog?.append('context_compact', 'engine', {
+            strategy: ctxState.strategy,
+            tokens_before: ctxState.currentTokens,
+            pct: ctxState.pct,
+          })
+          const compactResult = await maybeCompact(this.client, this.config.model, messages, undefined, this.config.sessionDir)
           if (compactResult.compacted) {
             messages.length = 0
             messages.push(...compactResult.messages)
             this.renderer.compactDone(compactResult.originalTokens, compactResult.summaryTokens)
+            this.eventLog?.append('context_compact', 'engine', {
+              tokens_after: compactResult.summaryTokens,
+              reduction: compactResult.originalTokens - compactResult.summaryTokens,
+            })
           }
         } else if (ctxState.shouldWarn) {
           this.renderer.contextWarning(ctxState.currentTokens, ctxState.maxTokens, ctxState.pct)
@@ -427,6 +513,10 @@ export class ExecutionEngine {
           const criticism = await this.runCriticCheck(messages)
           if (criticism) {
             this.renderer.warn(`[批判检查] ${criticism.split('\n')[0]}`)
+            this.eventLog?.append('critic_flag', 'critic', {
+              criticism: criticism.slice(0, 500),
+              iteration: iterations,
+            })
             messages.push({
               role: 'user',
               content: `[🔍 自动纠错检查]\n${criticism}\n\n请根据以上纠错提示立即调整行动。`,
@@ -579,6 +669,7 @@ export class ExecutionEngine {
             for (const { tc, input } of batch.calls) {
               this.renderer.toolStart(tc.name, input)
               this.config.hookRunner?.runPreToolCall(tc.name, input)
+              this.eventLog?.append('tool_call', tc.name, { input }, [tc.name])
             }
 
             // Execute concurrently
@@ -594,6 +685,7 @@ export class ExecutionEngine {
               const result = results[i]
               this.config.hookRunner?.runPostToolCall(tc.name, result.content, result.isError)
               this.renderer.toolResult(tc.name, result.content, result.isError)
+              this.eventLog?.append('tool_result', tc.name, { content: result.content.slice(0, 500), isError: result.isError }, [tc.name, result.isError ? 'error' : 'success'])
               messages.push({
                 role: 'tool',
                 tool_call_id: tc.id,
@@ -608,11 +700,13 @@ export class ExecutionEngine {
 
               this.renderer.toolStart(tc.name, input)
               this.config.hookRunner?.runPreToolCall(tc.name, input)
+              this.eventLog?.append('tool_call', tc.name, { input }, [tc.name])
 
               const result = await this.executeToolCall(tc.name, input, toolContext, planMode)
 
               this.config.hookRunner?.runPostToolCall(tc.name, result.content, result.isError)
               this.renderer.toolResult(tc.name, result.content, result.isError)
+              this.eventLog?.append('tool_result', tc.name, { content: result.content.slice(0, 500), isError: result.isError }, [tc.name, result.isError ? 'error' : 'success'])
 
               messages.push({
                 role: 'tool',
@@ -676,6 +770,17 @@ export class ExecutionEngine {
       return {
         content: `⛔ 协调者模式：主 agent 不能直接使用 ${toolName}。${agentSuggestion}`,
         isError: true,
+      }
+    }
+    // In coordinator mode, Bash is restricted to read-only commands
+    if (coordinatorMode && toolName === 'Bash') {
+      const cmd = String(input.command ?? '')
+      const bashCheck = this.checkCoordinatorBash(cmd)
+      if (!bashCheck.allowed) {
+        return {
+          content: `⛔ 协调者模式：Bash 命令 "${cmd}" 被拦截。\n原因: ${bashCheck.reason}\n主 agent 只能使用只读命令（tail/head/cat/wc/grep/ps/ls/stat/find等）查看子 agent 进度。`,
+          isError: true,
+        }
       }
     }
     if (coordinatorMode) {
@@ -744,6 +849,19 @@ export class ExecutionEngine {
         this.toolCache.set(toolName, input, result, ttl)
       }
 
+      // Write episodic memory entry
+      const epiMem = this.config.episodicMemory
+      if (epiMem) {
+        epiMem.write({
+          turn: 0,
+          toolName,
+          inputSummary: JSON.stringify(input).slice(0, 200),
+          resultSummary: result.content.slice(0, 300),
+          outcome: result.isError ? 'failure' : 'success',
+          timestamp: new Date().toISOString(),
+        })
+      }
+
       return result
     } catch (err: unknown) {
       // Handle error in progress tracking — use the same isLongRunningTool flag
@@ -768,10 +886,6 @@ export class ExecutionEngine {
    */
   private getCoordinatorSuggestion(toolName: string, input: Record<string, unknown>): string {
     const TOOL_TO_AGENT: Record<string, { type: string; reason: string }> = {
-      'Bash': {
-        type: '根据命令内容选择子agent类型',
-        reason: 'Bash命令是子agent的工作。扫描用recon/vuln-scan，利用用manual-exploit/tool-exploit，靶机用target-recon',
-      },
       'MultiScan': {
         type: 'vuln-scan → web-vuln / service-vuln',
         reason: 'MultiScan只是并行Bash，没有LLM推理。用MultiAgent启动vuln-scan子agent',
@@ -795,42 +909,40 @@ export class ExecutionEngine {
     }
 
     const suggestion = TOOL_TO_AGENT[toolName]
-    if (!suggestion) {
-      return `请通过 Agent 或 MultiAgent 委派子agent执行。`
-    }
-
     if (toolName === 'Bash') {
       const cmd = String(input.command ?? '').toLowerCase()
       if (cmd.includes('nmap') || cmd.includes('masscan') || cmd.includes('naabu')) {
-        return `请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "侦察", prompt: "对 TARGET 进行端口扫描" }] })`
+        return `扫描命令应由子agent执行。请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "侦察", prompt: "对 TARGET 进行端口扫描" }] })`
       }
       if (cmd.includes('nuclei') || cmd.includes('nikto') || cmd.includes('ffuf')) {
-        return `请用 MultiAgent 启动 vuln-scan 子agent:\n  MultiAgent({ agents: [{ subagent_type: "vuln-scan", description: "漏洞扫描", prompt: "对 TARGET 进行漏洞扫描" }] })`
+        return `扫描命令应由子agent执行。请用 MultiAgent 启动 vuln-scan 子agent:\n  MultiAgent({ agents: [{ subagent_type: "vuln-scan", description: "漏洞扫描", prompt: "对 TARGET 进行漏洞扫描" }] })`
       }
       if (cmd.includes('sqlmap')) {
-        return `请用 MultiAgent 启动 manual-exploit 和 tool-exploit 子agent:\n  MultiAgent({ agents: [{ subagent_type: "manual-exploit", ... }, { subagent_type: "tool-exploit", ... }] })`
+        return `利用命令应由子agent执行。请用 MultiAgent 启动 manual-exploit 和 tool-exploit 子agent:\n  MultiAgent({ agents: [{ subagent_type: "manual-exploit", ... }, { subagent_type: "tool-exploit", ... }] })`
       }
       if (cmd.includes('hydra') || cmd.includes('kerbrute')) {
-        return `请用 MultiAgent 启动 vuln-scan 子agent:\n  MultiAgent({ agents: [{ subagent_type: "vuln-scan", description: "认证攻击", prompt: "对 TARGET 进行弱口令测试" }] })`
+        return `爆破命令应由子agent执行。请用 MultiAgent 启动 vuln-scan 子agent:\n  MultiAgent({ agents: [{ subagent_type: "vuln-scan", description: "认证攻击", prompt: "对 TARGET 进行弱口令测试" }] })`
       }
       if (cmd.includes('subfinder') || cmd.includes('dnsx') || cmd.includes('amass')) {
-        return `请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "DNS侦察", prompt: "对 TARGET 进行DNS子域名枚举" }] })`
+        return `侦察命令应由子agent执行。请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "DNS侦察", prompt: "对 TARGET 进行DNS子域名枚举" }] })`
       }
       if (cmd.includes('httpx') || cmd.includes('katana')) {
-        return `请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "Web探测", prompt: "对 TARGET 进行Web服务探测" }] })`
+        return `探测命令应由子agent执行。请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "Web探测", prompt: "对 TARGET 进行Web服务探测" }] })`
       }
       if (cmd.includes('chisel') || cmd.includes('stowaway') || cmd.includes('proxychains')) {
-        return `请用 Agent 启动 tunnel 子agent:\n  Agent({ subagent_type: "tunnel", description: "内网穿透", prompt: "建立内网穿透代理" })`
+        return `穿透命令应由子agent执行。请用 Agent 启动 tunnel 子agent:\n  Agent({ subagent_type: "tunnel", description: "内网穿透", prompt: "建立内网穿透代理" })`
       }
       if (cmd.includes('linpeas') || cmd.includes('winpeas')) {
-        return `请用 Agent 启动 privesc 子agent:\n  Agent({ subagent_type: "privesc", description: "权限提升", prompt: "在靶机上进行提权" })`
+        return `提权命令应由子agent执行。请用 Agent 启动 privesc 子agent:\n  Agent({ subagent_type: "privesc", description: "权限提升", prompt: "在靶机上进行提权" })`
       }
       if (cmd.includes('find') && cmd.includes('flag')) {
-        return `请用 Agent 启动 flag-hunter 子agent:\n  Agent({ subagent_type: "flag-hunter", description: "Flag收集", prompt: "搜索并收集flag" })`
+        return `Flag搜索应由子agent执行。请用 Agent 启动 flag-hunter 子agent:\n  Agent({ subagent_type: "flag-hunter", description: "Flag收集", prompt: "搜索并收集flag" })`
       }
-      if (cmd.includes('tail') || cmd.includes('cat') || cmd.includes('head')) {
-        return `读取文件请用 Read 工具:\n  Read({ file_path: "SESSION_DIR/xxx.txt" })`
-      }
+      return `只读命令（tail/cat/grep/ps/wc等）可直接使用。扫描/利用命令应通过 Agent 或 MultiAgent 委派子agent执行。`
+    }
+
+    if (!suggestion) {
+      return `请通过 Agent 或 MultiAgent 委派子agent执行。`
     }
 
     return `${suggestion.reason}。请用 MultiAgent/Agent 启动 ${suggestion.type} 子agent。`
@@ -873,5 +985,30 @@ export class ExecutionEngine {
     }
 
     return null
+  }
+
+  /**
+   * Check whether a Bash command is allowed in coordinator mode.
+   * Uses whitelist (allowed patterns) + blacklist (blocked patterns).
+   */
+  private checkCoordinatorBash(cmd: string): { allowed: boolean; reason: string } {
+    const trimmed = cmd.trim()
+    if (!trimmed) return { allowed: false, reason: '空命令' }
+
+    // First check blacklist — if any blacklisted pattern matches, block
+    for (const re of COORDINATOR_BASH_BLACKLIST) {
+      if (re.test(trimmed.toLowerCase())) {
+        return { allowed: false, reason: `该命令匹配黑名单：${re.source}，属于扫描/利用/安装类操作，应委派子 agent` }
+      }
+    }
+
+    // Then check whitelist — if any whitelisted pattern matches, allow
+    for (const re of COORDINATOR_BASH_WHITELIST) {
+      if (re.test(trimmed.toLowerCase())) {
+        return { allowed: true, reason: '' }
+      }
+    }
+
+    return { allowed: false, reason: '该命令不在协调者只读命令白名单中' }
   }
 }

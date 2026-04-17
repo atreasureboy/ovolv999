@@ -7,8 +7,90 @@
  */
 
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, appendFileSync } from 'fs'
 import { resolve, join } from 'path'
+
+// ─── Anchors ─────────────────────────────────────────────────────────────────
+
+/**
+ * Context anchors — a compact JSON file that records critical discoveries
+ * (ports, CVEs, credentials, shells) that must never be lost even when
+ * the conversation history is compacted.
+ *
+ * Updated alongside each FindingWrite call.  The engine reads this file
+ * and injects its contents into the system prompt during auto-compact.
+ */
+interface AnchorPort { target: string; port: number; protocol: string; service?: string }
+interface AnchorCVE { cve: string; target: string; score: number }
+interface AnchorCred { target: string; username?: string; credential: string; type: string }
+interface AnchorShell { id: string; target: string; user: string; privilege: string }
+
+interface AnchorStore {
+  ports: AnchorPort[]
+  cves: AnchorCVE[]
+  creds: AnchorCred[]
+  shells: AnchorShell[]
+  flags: { content: string; target: string; path: string }[]
+}
+
+function getAnchorsPath(sessionDir?: string): string | null {
+  if (!sessionDir) return null
+  return join(sessionDir, '.anchors.json')
+}
+
+function loadAnchors(path: string): AnchorStore {
+  try {
+    if (existsSync(path)) return JSON.parse(readFileSync(path, 'utf8')) as AnchorStore
+  } catch { /* ignore */ }
+  return { ports: [], cves: [], creds: [], shells: [], flags: [] }
+}
+
+function saveAnchors(path: string, anchors: AnchorStore): void {
+  try { writeFileSync(path, JSON.stringify(anchors, null, 2), 'utf8') } catch { /* best-effort */ }
+}
+
+function updateAnchorsFromFinding(sessionDir: string | undefined, f: Finding): void {
+  const path = getAnchorsPath(sessionDir)
+  if (!path) return
+
+  const anchors = loadAnchors(path)
+
+  // Port anchors
+  if (f.phase === 'recon' || f.type === 'open-port') {
+    const portMatch = f.target.match(/^(.+):(\d+)$/)
+    if (portMatch) {
+      anchors.ports.push({ target: portMatch[1], port: parseInt(portMatch[2], 10), protocol: f.type })
+    }
+  }
+
+  // CVE anchors
+  if (f.cve) {
+    for (const c of f.cve) {
+      if (!anchors.cves.some(x => x.cve === c && x.target === f.target)) {
+        anchors.cves.push({ cve: c, target: f.target, score: f.severity === 'critical' ? 95 : f.severity === 'high' ? 80 : 60 })
+      }
+    }
+  }
+
+  // Credential anchors
+  if (f.severity === 'critical' && (f.type === 'weak-cred' || f.type === 'info-disclosure')) {
+    anchors.creds.push({ target: f.target, username: '', credential: f.title, type: f.type })
+  }
+
+  // Shell anchors
+  if (f.type === 'shell' || f.type === 'webshell' || f.phase === 'initial-access') {
+    if (f.severity === 'critical') {
+      anchors.shells.push({ id: f.id, target: f.target, user: '', privilege: f.severity })
+    }
+  }
+
+  // Flag anchors
+  if (f.title.toLowerCase().includes('flag')) {
+    anchors.flags.push({ content: f.title, target: f.target, path: f.target })
+  }
+
+  saveAnchors(path, anchors)
+}
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info'
 export type Phase =
@@ -180,6 +262,9 @@ export class FindingWriteTool implements Tool {
     }
 
     writeFileSync(filePath, JSON.stringify(finding, null, 2), 'utf8')
+
+    // ── Update context anchors (prevents "amnesia" during compaction) ──
+    updateAnchorsFromFinding(context.sessionDir, finding)
 
     const action = isUpdate ? '已更新' : '已记录'
     return {

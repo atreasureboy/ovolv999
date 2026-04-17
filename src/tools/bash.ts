@@ -7,9 +7,11 @@
  * (SIGTERM → SIGKILL after 5 s)
  */
 
-import { exec } from 'child_process'
+import { exec, spawn } from 'child_process'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
 import { BASH_DESCRIPTION } from '../prompts/tools.js'
+import { mkdirSync, existsSync } from 'fs'
+import { join } from 'path'
 
 const MAX_OUTPUT_LENGTH = 30_000
 const DEFAULT_TIMEOUT_MS = 1_800_000  // 30 min — 全量扫描默认值（nuclei/nmap 全端口等）
@@ -20,6 +22,7 @@ export interface BashInput {
   timeout?: number
   run_in_background?: boolean
   description?: string
+  follow_mode?: boolean   // Stream output to user's tmux pane for spectator view
 }
 
 function truncateOutput(output: string, maxLen: number): string {
@@ -57,6 +60,10 @@ export class BashTool implements Tool {
             type: 'string',
             description: 'Brief description of what this command does (shown to user)',
           },
+          follow_mode: {
+            type: 'boolean',
+            description: 'If true, stream output to a tmux pane for real-time user viewing (spectator mode). The LLM still receives the full output after completion.',
+          },
         },
         required: ['command'],
       },
@@ -64,7 +71,7 @@ export class BashTool implements Tool {
   }
 
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
-    const { command, timeout, run_in_background } = input as unknown as BashInput
+    const { command, timeout, run_in_background, follow_mode } = input as unknown as BashInput
 
     if (!command || typeof command !== 'string') {
       return { content: 'Error: command is required and must be a string', isError: true }
@@ -75,18 +82,34 @@ export class BashTool implements Tool {
       MAX_TIMEOUT_MS,
     )
 
-    // ── Background mode (fire-and-forget) ───────────────────────
+    // ── Background mode (fire-and-forget with auto log redirect) ─────────────
     if (run_in_background) {
       const { spawn } = await import('child_process')
-      const child = spawn('bash', ['-c', command], {
+
+      // Auto-redirect stdout/stderr to a session-scoped log file so output
+      // is never lost even if the caller forgets to add `> file 2>&1`.
+      const bgLogDir = context.sessionDir ? join(context.sessionDir, '.bg_logs') : join(context.cwd, '.bg_logs')
+      try { mkdirSync(bgLogDir, { recursive: true }) } catch { /* best-effort */ }
+
+      const ts = Date.now()
+      const safeCmd = command.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40)
+      const logFile = join(bgLogDir, `${ts}_${safeCmd}.log`)
+
+      // Append redirect if the caller didn't already redirect
+      const alreadyRedirected = command.includes('>') || command.includes('2>&1') || command.includes('/dev/null')
+      const actualCommand = alreadyRedirected ? command : `${command} >> "${logFile}" 2>&1`
+
+      const child = spawn('bash', ['-c', actualCommand], {
         detached: true,
         stdio: 'ignore',
         cwd: context.cwd,
         env: process.env,
       })
       child.unref()
+
+      const redirectInfo = alreadyRedirected ? '' : `\n输出自动重定向到: ${logFile}`
       return {
-        content: `Command started in background (PID: ${child.pid})`,
+        content: `Command started in background (PID: ${child.pid})${redirectInfo}`,
         isError: false,
       }
     }
@@ -97,8 +120,54 @@ export class BashTool implements Tool {
     return new Promise<ToolResult>((resolve) => {
       let settled = false
 
+      // ── follow_mode: set up tmux spectator pane ───────────────
+      let actualCommand = command
+      let followCleanup: (() => void) | null = null
+      let followModeHint = ''
+      if (follow_mode) {
+        const followLogDir = context.sessionDir ? join(context.sessionDir, '.bg_logs') : join(context.cwd, '.bg_logs')
+        try { mkdirSync(followLogDir, { recursive: true }) } catch { /* best-effort */ }
+        const ts = Date.now()
+        const safeCmd = command.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40)
+        const followLogFile = join(followLogDir, `${ts}_${safeCmd}_follow.log`)
+
+        // Wrap command: tee duplicates output so the LLM captures it AND the follow log gets it
+        actualCommand = `{ ${command}; } 2>&1 | tee -a "${followLogFile}"`
+
+        // Launch a tmux session with tail -f for user viewing
+        const tmuxSessionName = `ovogo-follow-${ts}`
+        let paneJoined = false
+        try {
+          spawn('tmux', ['new-session', '-d', '-s', tmuxSessionName, '-x', '200', '-y', '50'], {
+            cwd: context.cwd,
+            detached: true,
+          })
+          spawn('tmux', ['send-keys', '-t', tmuxSessionName, `tail -n +1 -f "${followLogFile}"`, 'Enter'], {
+            cwd: context.cwd,
+          })
+          // Try to join the follow pane into the user's current tmux window
+          try {
+            const currentTmux = process.env.TMUX_PANE ? process.env.TMUX?.split(',')[0]?.replace(/^\//, '') : null
+            if (currentTmux) {
+              spawn('tmux', ['join-pane', '-t', `${currentTmux}`, '-s', `${tmuxSessionName}`, '-l', '15'], {
+                cwd: context.cwd,
+              })
+              paneJoined = true
+            }
+          } catch { /* best-effort: user can manually attach */ }
+
+          followModeHint = paneJoined
+            ? '[观战面板已嵌入当前 tmux 窗口底部]'
+            : `[观战面板: tmux attach -t ${tmuxSessionName}]`
+
+          followCleanup = () => {
+            try { spawn('tmux', ['kill-session', '-t', tmuxSessionName], { detached: true }) } catch { /* ignore */ }
+          }
+        } catch { /* tmux not available, degrade gracefully */ }
+      }
+
       const child = exec(
-        command,
+        actualCommand,
         {
           cwd: context.cwd,
           timeout: timeoutMs,
@@ -112,6 +181,11 @@ export class BashTool implements Tool {
             context.signal.removeEventListener('abort', onAbort)
           }
 
+          // Clean up follow mode resources
+          if (followCleanup) {
+            followCleanup()
+          }
+
           if (settled) return
           settled = true
 
@@ -123,7 +197,8 @@ export class BashTool implements Tool {
 
           if (!err) {
             const combined = [stdout, stderr].filter(Boolean).join('\n').trimEnd()
-            resolve({ content: truncateOutput(combined, MAX_OUTPUT_LENGTH) || '(no output)', isError: false })
+            const prefix = follow_mode ? `[Spectator mode: output streamed to tmux pane] ${followModeHint}\n` : ''
+            resolve({ content: truncateOutput(prefix + combined, MAX_OUTPUT_LENGTH) || '(no output)', isError: false })
             return
           }
 
@@ -143,8 +218,9 @@ export class BashTool implements Tool {
           // Non-zero exit — provide stdout+stderr so the LLM can diagnose
           const out = [nodeErr.stdout ?? stdout, nodeErr.stderr ?? stderr].filter(Boolean).join('\n').trimEnd()
           const exitCode = nodeErr.code ?? 1
+          const prefix = follow_mode ? `[Spectator mode: output streamed to tmux pane] ${followModeHint}\n` : ''
           resolve({
-            content: truncateOutput(`Exit code: ${exitCode}\n${out}`, MAX_OUTPUT_LENGTH).trimEnd(),
+            content: truncateOutput(prefix + `Exit code: ${exitCode}\n${out}`, MAX_OUTPUT_LENGTH).trimEnd(),
             isError: false,  // non-zero exit is not necessarily fatal
           })
         },

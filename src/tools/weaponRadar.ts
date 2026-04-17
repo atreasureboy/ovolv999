@@ -61,16 +61,14 @@ function formatSingleResult(output: RadarOutput): string {
     }
 
     if (r.poc_code) {
-      const safeName = r.module_name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60)
-      const tmpPath  = `/tmp/poc_${safeName}.yaml`
-      lines.push(`    ▶ 执行方式:`)
-      lines.push(`      cat > ${tmpPath} << 'NUCLEI_EOF'`)
-      lines.push(r.poc_code)
-      lines.push(`NUCLEI_EOF`)
-      lines.push(`      /root/go/bin/nuclei -u TARGET -t ${tmpPath} -silent`)
+      // ⚠️ poc_code 是漏洞原理参考，不是 nuclei 模板。
+      // 从 attack_logic 中提取关键信息，给出 curl/Python 验证建议。
+      lines.push(`    ▶ PoC 原理参考（需改写为手动 exploit）:`)
+      lines.push(`      ${r.poc_code.slice(0, 300)}${r.poc_code.length > 300 ? '...' : ''}`)
       if (r.cve_list && r.cve_list.length > 0) {
-        lines.push(`      # 或用 -id: /root/go/bin/nuclei -u TARGET -id ${r.cve_list[0]}`)
+        lines.push(`      快速验证: nuclei -u TARGET -id ${r.cve_list[0]} -silent`)
       }
+      lines.push(`      利用步骤: 1) 从 poc_code 提取 endpoint+payload → 2) curl 验证 → 3) 利用`)
     }
     lines.push('')
   }

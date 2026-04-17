@@ -68,8 +68,49 @@ interface C2Session {
 export class C2Tool implements Tool {
   name = 'C2'
 
-  private listeners: Map<string, C2Listener> = new Map()
-  private sessions: Map<string, C2Session> = new Map()
+  private listeners: Map<string, C2Listener>
+  private sessions: Map<string, C2Session>
+  private stateFile: string
+
+  constructor() {
+    this.stateFile = ''  // initialized in execute() from context
+    this.listeners = new Map()
+    this.sessions = new Map()
+    this._loadState()
+  }
+
+  // ── State persistence ──────────────────────────────────────────────────
+
+  private _getStatePath(sessionDir?: string): string {
+    if (!sessionDir) return ''
+    return path.join(sessionDir, 'c2_state.json')
+  }
+
+  private _loadState(): void {
+    try {
+      if (!this.stateFile || !fs.existsSync(this.stateFile)) return
+      const raw = fs.readFileSync(this.stateFile, 'utf8')
+      const state = JSON.parse(raw) as { listeners?: C2Listener[]; sessions?: C2Session[] }
+      if (state.listeners) {
+        for (const l of state.listeners) this.listeners.set(l.name, l)
+      }
+      if (state.sessions) {
+        for (const s of state.sessions) this.sessions.set(s.id, s)
+      }
+    } catch { /* best-effort restore */ }
+  }
+
+  private _saveState(): void {
+    if (!this.stateFile) return
+    try {
+      const state = {
+        listeners: Array.from(this.listeners.values()),
+        sessions: Array.from(this.sessions.values()),
+        savedAt: new Date().toISOString(),
+      }
+      fs.writeFileSync(this.stateFile, JSON.stringify(state, null, 2), 'utf8')
+    } catch { /* best-effort save */ }
+  }
 
   definition: ToolDefinition = {
     type: 'function',
@@ -201,6 +242,13 @@ C2({ action: "auto_exploit", framework: "metasploit", platform: "linux", lport: 
 
   async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
     const c2Input = input as unknown as C2Input
+
+    // Initialize state file from sessionDir on first call
+    const statePath = this._getStatePath(context.sessionDir)
+    if (statePath && statePath !== this.stateFile) {
+      this.stateFile = statePath
+      this._loadState()
+    }
 
     switch (c2Input.action) {
       case 'get_ip':         return this.getIP()
@@ -428,6 +476,7 @@ C2({ action: "auto_exploit", framework: "metasploit", platform: "linux", lport: 
       }
       this.listeners.set(listenerName, listener)
     }
+    this._saveState()
 
     return { content: result, isError: false }
   }
@@ -866,12 +915,14 @@ C2({ action: "auto_exploit", framework: "metasploit", platform: "linux", lport: 
             await exec(`tmux send-keys -t ${listener.tmuxSession} ${this.shellEsc(`sessions -k ${num}`)} Enter`)
           } catch { /* ignore */ }
           this.sessions.delete(session_id)
+          this._saveState()
           return { content: `[C2] MSF session ${session_id} 已关闭`, isError: false }
         }
       }
     }
 
     this.sessions.delete(session_id)
+    this._saveState()
     return { content: `[C2] Session ${session_id} 已从记录中移除`, isError: false }
   }
 
@@ -910,6 +961,7 @@ C2({ action: "auto_exploit", framework: "metasploit", platform: "linux", lport: 
     }
 
     this.listeners.delete(listener_name)
+    this._saveState()
     return { content: `[C2] 监听器 "${listener_name}" 已关闭`, isError: false }
   }
 

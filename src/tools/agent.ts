@@ -14,6 +14,14 @@ import { Renderer } from '../ui/renderer.js'
 import { tmuxLayout } from '../ui/tmuxLayout.js'
 import { appendFileSync } from 'fs'
 import { join } from 'path'
+import type { DispatchManager } from '../core/dispatch.js'
+
+// Shared dispatch manager — injected at startup
+let _dispatchManager: DispatchManager | null = null
+
+export function setDispatchManager(dm: DispatchManager): void {
+  _dispatchManager = dm
+}
 
 // Generic legacy types (kept for backward-compat)
 type LegacyAgentType = 'general-purpose' | 'explore' | 'plan' | 'code-reviewer'
@@ -121,6 +129,27 @@ export async function runAgentTask(
   mainRenderer.agentStart(description, agentType)
   const agentStartTime = Date.now()
 
+  // Write agent spawn event via event log
+  context.eventLog?.append('agent_spawn', agentType, { description }, [agentType])
+
+  // ── Dynamic iteration extension ──
+  // Scanning / lateral / recon agents launch long-running background tools
+  // (nuclei / nmap / hydra / proxychains nmap) and then poll for results.
+  // Each poll cycle consumes LLM iterations.  Without extra headroom the agent
+  // exits before background scans finish, losing results.
+  //
+  // Rule: if the agent type is known to run background scans, add a buffer.
+  // The buffer is applied on top of the caller-provided maxIterations.
+  const BACKGROUND_SCAN_TYPES = new Set<AgentType>([
+    'vuln-scan', 'web-vuln', 'service-vuln', 'auth-attack',
+    'recon', 'port-scan', 'dns-recon', 'web-probe',
+    'lateral', 'internal-recon', 'tunnel',
+    'privesc', 'target-recon', 'flag-hunter',
+  ])
+
+  const ITERATION_BUFFER = BACKGROUND_SCAN_TYPES.has(agentType) ? 100 : 0
+  const effectiveMaxIterations = maxIterations + ITERATION_BUFFER
+
   // Attempt to acquire a tmux pane slot for detailed output
   const agentLabel = `[${agentType}] ${description}`
   const paneSlot = tmuxLayout.acquireSlot(agentLabel)
@@ -141,7 +170,7 @@ export async function runAgentTask(
 
   const childConfig: EngineConfig = {
     ..._currentConfig,
-    maxIterations,
+    maxIterations: effectiveMaxIterations,
     cwd: context.cwd,
     hookRunner: undefined,
     planMode: READ_ONLY_TYPES.has(agentType),
@@ -189,7 +218,8 @@ export async function runAgentTask(
     event: 'delegation.start',
     agent_type: agentType,
     description,
-    max_iterations: maxIterations,
+    max_iterations: effectiveMaxIterations,
+    iteration_buffer: ITERATION_BUFFER,
     placeholders_replaced: placeholdersReplaced,
     prompt_preview: normalizedPrompt.slice(0, 500),
   })
@@ -221,6 +251,12 @@ export async function runAgentTask(
 
     mainRenderer.agentDone(description, result.reason !== 'error')
     if (paneSlot) tmuxLayout.releaseSlot(paneSlot.slot)
+    context.eventLog?.append('agent_complete', agentType, {
+      description,
+      success: result.reason !== 'error',
+      reason: result.reason,
+      duration_ms: durationMs,
+    }, [agentType, result.reason !== 'error' ? 'success' : 'error'])
     appendAgentEvent(_currentConfig, {
       event: 'delegation.done',
       agent_type: agentType,
@@ -433,5 +469,178 @@ Sub-agent 没有父对话上下文，所有信息必须在 prompt 中提供。`,
     }
 
     return runAgentTask(description, prompt, agentType, maxIterations, context)
+  }
+}
+
+// ── Dispatch Tools — async agent communication with callback pattern ──────────
+
+export class DispatchAgentTool implements Tool {
+  name = 'DispatchAgent'
+
+  definition: ToolDefinition = {
+    type: 'function',
+    function: {
+      name: 'DispatchAgent',
+      description: `异步分发任务给子 agent，不阻塞当前思考。返回 dispatch_id，可用 CheckDispatch 查状态、GetDispatchResult 取结果。
+
+适用于：多个独立任务需要并行启动但主 agent 想继续推理的场景。`,
+      parameters: {
+        type: 'object',
+        properties: {
+          agent_type: {
+            type: 'string',
+            description: '子 agent 类型（recon / vuln-scan / manual-exploit / flag-hunter 等）',
+          },
+          description: {
+            type: 'string',
+            description: '任务简短标签',
+          },
+          prompt: {
+            type: 'string',
+            description: '完整任务指令，必须自包含（目标、session_dir、具体任务）',
+          },
+        },
+        required: ['agent_type', 'description', 'prompt'],
+      },
+    },
+  }
+
+  async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    const agentType = String(input.agent_type ?? 'general-purpose')
+    const description = String(input.description ?? 'dispatched task')
+    const prompt = String(input.prompt ?? '')
+    const defaultIter = DEFAULT_ITERATIONS[agentType] ?? 30
+    const maxIterations = typeof input.max_iterations === 'number'
+      ? Math.min(input.max_iterations, 200)
+      : defaultIter
+
+    if (!prompt.trim()) {
+      return { content: 'Error: prompt 不能为空', isError: true }
+    }
+
+    if (!_dispatchManager) {
+      return { content: 'Error: DispatchManager 未初始化', isError: true }
+    }
+
+    if (!_engineFactory || !_currentConfig || !_currentRenderer) {
+      return { content: 'Error: AgentTool 未初始化', isError: true }
+    }
+
+    const record = _dispatchManager.create(agentType, prompt)
+    _dispatchManager.update(record.id, { status: 'running' })
+
+    // Log the dispatch event
+    context.eventLog?.append('dispatch_start', 'DispatchAgent', {
+      id: record.id,
+      agentType,
+      description,
+    })
+
+    // Fire-and-forget: run the agent task in background, update dispatch on completion
+    runAgentTask(description, prompt, agentType as AgentType, maxIterations, context)
+      .then((result) => {
+        _dispatchManager?.update(record.id, {
+          status: result.isError ? 'failed' : 'completed',
+          result: result.content,
+          error: result.isError ? result.content : undefined,
+        })
+        context.eventLog?.append('dispatch_complete', 'DispatchAgent', {
+          id: record.id,
+          agentType,
+          description,
+          success: !result.isError,
+        })
+      })
+      .catch((err) => {
+        _dispatchManager?.update(record.id, {
+          status: 'failed',
+          error: String(err),
+        })
+      })
+
+    return {
+      content: `Dispatch 已创建并启动。\nID: ${record.id}\n类型: ${agentType}\n标签: ${description}\n\n使用 CheckDispatch({ dispatch_id: "${record.id}" }) 查状态，或用 GetDispatchResult({ dispatch_id: "${record.id}" }) 获取结果。`,
+      isError: false,
+    }
+  }
+}
+
+export class CheckDispatchTool implements Tool {
+  name = 'CheckDispatch'
+
+  definition: ToolDefinition = {
+    type: 'function',
+    function: {
+      name: 'CheckDispatch',
+      description: '查询 dispatch 任务的当前状态（pending / running / completed / failed）',
+      parameters: {
+        type: 'object',
+        properties: {
+          dispatch_id: {
+            type: 'string',
+            description: 'DispatchAgent 返回的 dispatch_id',
+          },
+        },
+        required: ['dispatch_id'],
+      },
+    },
+  }
+
+  async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    const id = String(input.dispatch_id ?? '')
+    if (!_dispatchManager) {
+      return { content: 'Error: DispatchManager 未初始化', isError: true }
+    }
+    const record = _dispatchManager.get(id)
+    if (!record) {
+      return { content: `Error: dispatch_id "${id}" 不存在`, isError: true }
+    }
+    return {
+      content: `Dispatch ${id}:\n  状态: ${record.status}\n  类型: ${record.agentType}\n  开始: ${record.startedAt}\n  ${record.completedAt ? `完成: ${record.completedAt}` : '仍在运行中'}`,
+      isError: false,
+    }
+  }
+}
+
+export class GetDispatchResultTool implements Tool {
+  name = 'GetDispatchResult'
+
+  definition: ToolDefinition = {
+    type: 'function',
+    function: {
+      name: 'GetDispatchResult',
+      description: '获取已完成 dispatch 的输出结果',
+      parameters: {
+        type: 'object',
+        properties: {
+          dispatch_id: {
+            type: 'string',
+            description: 'DispatchAgent 返回的 dispatch_id',
+          },
+        },
+        required: ['dispatch_id'],
+      },
+    },
+  }
+
+  async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    const id = String(input.dispatch_id ?? '')
+    if (!_dispatchManager) {
+      return { content: 'Error: DispatchManager 未初始化', isError: true }
+    }
+    const record = _dispatchManager.get(id)
+    if (!record) {
+      return { content: `Error: dispatch_id "${id}" 不存在`, isError: true }
+    }
+    if (record.status === 'pending' || record.status === 'running') {
+      return { content: `Dispatch ${id} 仍在 ${record.status} 状态，尚无结果。请稍后重试。`, isError: false }
+    }
+    if (record.status === 'failed') {
+      return { content: `Dispatch ${id} 失败: ${record.error ?? '未知错误'}`, isError: true }
+    }
+    return {
+      content: `[${record.agentType}] "${id}" 结果:\n\n${record.result ?? '(无输出)'}`,
+      isError: false,
+    }
   }
 }

@@ -1,2 +1,0 @@
-[CVE-2024-2473] [http] [medium] https://zhhovo.top/wp-admin/?action=postpass
-[cookies-without-secure] [javascript] [info] zhhovo.top ["SITE_TOTAL_ID"]

@@ -12,7 +12,7 @@ import { GrepTool } from './grep.js'
 import { TodoWriteTool } from './todo.js'
 import { WebFetchTool } from './webFetch.js'
 import { WebSearchTool } from './webSearch.js'
-import { AgentTool } from './agent.js'
+import { AgentTool, DispatchAgentTool, CheckDispatchTool, GetDispatchResultTool } from './agent.js'
 import { FindingWriteTool, FindingListTool } from './finding.js'
 import { WeaponRadarTool } from './weaponRadar.js'
 import { MultiScanTool } from './multiScan.js'
@@ -35,6 +35,9 @@ export function createTools(extraTools: Tool[] = []): Tool[] {
     new WebSearchTool(),
     new AgentTool(),
     new MultiAgentTool(),
+    new DispatchAgentTool(),
+    new CheckDispatchTool(),
+    new GetDispatchResultTool(),
     new ShellSessionTool(),
     new TmuxSessionTool(),
     new FindingWriteTool(),

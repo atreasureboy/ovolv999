@@ -85,6 +85,17 @@ export interface ToolContext {
    * (e.g. image analysis via vision API) to reuse the same endpoint + key.
    */
   apiConfig?: { apiKey: string; baseURL?: string; model: string }
+  /**
+   * Session output directory — for tools that need to write to the engagement
+   * session directory (e.g. FindingWrite for anchor updates).
+   */
+  sessionDir?: string
+  /** Event log for audit trail — best-effort, never throws */
+  eventLog?: import('./eventLog.js').EventLog
+  /** Semantic memory — cross-turn knowledge persistence */
+  semanticMemory?: import('./semanticMemory.js').SemanticMemory
+  /** Episodic memory — action trajectory persistence */
+  episodicMemory?: import('./episodicMemory.js').EpisodicMemory
 }
 
 /**
@@ -124,8 +135,6 @@ export interface EngineConfig {
   outOfScopeTargets?: string[]
   /** Current engagement phase */
   engagementPhase?: string
-  /** Priority queue for tool execution */
-  priorityQueue?: import('./priorityQueue.js').PriorityQueue
   /** Progress tracker for long-running tools */
   progressTracker?: import('./progressTracker.js').ProgressTracker
   /** Cache for tool execution results */
@@ -142,6 +151,16 @@ export interface EngineConfig {
    * compact/warn thresholds instead of a flat token count.
    */
   maxContextTokens?: number
+  /** Dispatch manager for async agent communication */
+  dispatchManager?: import('./dispatch.js').DispatchManager
+  /** Event log for audit trail */
+  eventLog?: import('./eventLog.js').EventLog
+  /** Context budget manager for explicit token allocation */
+  contextBudget?: import('./contextBudget.js').ContextBudgetManager
+  /** Semantic memory — cross-turn knowledge persistence */
+  semanticMemory?: import('./semanticMemory.js').SemanticMemory
+  /** Episodic memory — action trajectory persistence */
+  episodicMemory?: import('./episodicMemory.js').EpisodicMemory
 }
 
 export interface TurnResult {

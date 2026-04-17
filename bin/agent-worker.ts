@@ -147,50 +147,60 @@ function extractStructuredResult(
   // 尝试从输出中提取结构化信息
   // 这里简化处理，实际可以更复杂
 
-  // 提取端口
-  const portMatches = output.matchAll(/(\d+)\/(tcp|udp)/g)
+  // 提取端口 — 匹配 nmap/naabu 风格: "22/tcp  open  ssh"
+  const portMatches = output.matchAll(/^(\d+)\/(tcp|udp)\s+(open|filtered|closed)/gm)
   const ports: Port[] = []
+  const seenPorts = new Set<string>()
   for (const match of portMatches) {
-    ports.push({
-      port: parseInt(match[1], 10),
-      protocol: match[2],
-    })
+    const key = `${match[1]}/${match[2]}`
+    if (!seenPorts.has(key)) {
+      seenPorts.add(key)
+      ports.push({ port: parseInt(match[1], 10), protocol: match[2] })
+    }
   }
   if (ports.length > 0) {
-    result.openPorts = ports.slice(0, 100) // 限制数量
+    result.openPorts = ports.slice(0, 100)
   }
 
-  // 提取 URL
-  const urlMatches = output.matchAll(/https?:\/\/[^\s]+/g)
+  // 提取 URL — 只匹配明确的服务 URL
+  const urlMatches = output.matchAll(/^(https?:\/\/[a-zA-Z0-9._-]+(?::\d+)?(?:\/[^\s,;|]*)?)$/gm)
   const urls: WebService[] = []
+  const seenUrls = new Set<string>()
   for (const match of urlMatches) {
-    urls.push({
-      url: match[0],
-      status: 200,
-    })
+    if (!seenUrls.has(match[1])) {
+      seenUrls.add(match[1])
+      urls.push({ url: match[1], status: 200 })
+    }
+  }
+  const urlLabelMatches = output.matchAll(/(?:URL|Target|Endpoint):\s*(https?:\/\/[^\s]+)/gi)
+  for (const match of urlLabelMatches) {
+    if (!seenUrls.has(match[1])) {
+      seenUrls.add(match[1])
+      urls.push({ url: match[1], status: 200 })
+    }
   }
   if (urls.length > 0) {
     result.webServices = urls.slice(0, 50)
   }
 
-  // 提取子域名
-  const subdomainMatches = output.matchAll(/([a-z0-9-]+\.)+[a-z]{2,}/gi)
+  // 提取子域名 — 从结构化标签行中提取
+  const subdomainMatches = output.matchAll(/(?:^Subdomain:\s*|^Host:\s*|^Domain:\s*)([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,})/gim)
   const subdomains = new Set<string>()
   for (const match of subdomainMatches) {
-    const domain = match[0].toLowerCase()
-    if (domain.includes('.') && !domain.startsWith('http')) {
-      subdomains.add(domain)
-    }
+    subdomains.add(match[1].toLowerCase())
   }
   if (subdomains.size > 0) {
     result.subdomains = Array.from(subdomains).slice(0, 100)
   }
 
-  // 提取 IP
-  const ipMatches = output.matchAll(/\b(\d{1,3}\.){3}\d{1,3}\b/g)
+  // 提取 IP — 从 nmap/网络工具输出中提取
+  const ipMatches = output.matchAll(/(?:Host:\s*|IP:\s*|Address:\s*|RHOSTS:\s*|^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b)/gm)
   const ips = new Set<string>()
   for (const match of ipMatches) {
-    ips.add(match[0])
+    const ip = match[1] || match[0].replace(/^[^\d]*/, '')
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip) && ip !== '127.0.0.1') {
+      ips.add(ip)
+    }
   }
   if (ips.size > 0) {
     result.ips = Array.from(ips).slice(0, 50)
