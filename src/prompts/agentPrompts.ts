@@ -100,26 +100,35 @@ const ATTACK_KB_REF = `
 
 ### 红旗信号（发现即深入利用）
 - **6379/11211/27017/9200 端口** → 未授权数据库访问
+- **5672 (RabbitMQ) / 9092 (Kafka)** → 消息队列未授权
 - **/actuator/** → Spring Boot 信息泄露 → heapdump → 密码
 - **/.env** → 数据库/API 密码
 - **/.git/** → 代码泄露 → git-dumper → 密码
 - **X-Forwarded-Host** → SSRF / Host 头注入
 - **JWT token** → jwt_tool 测试
+- **OAuth redirect_uri 参数** → 授权码劫持
 - **Apache 2.4.49/2.4.50** → CVE-2021-41773
+- **Log4j 2.x < 2.17** → Log4Shell (CVE-2021-44228)
 - **ThinkPHP** → RCE
 - **Shiro RememberMe** → 反序列化
+- **Confluence** → OGNL RCE (CVE-2022-26134)
 - **Jenkins /console** → Script Console RCE
 - **Docker Socket** → 容器逃逸
+- **K8s API 6443 未授权** → 全集群控制
+- **169.254.169.254** → 云元数据 → AWS/Azure 凭证
 - **phpMyAdmin 暴露** → 弱密码 → RCE
 
 ### Web 攻击向量
 - **API 注入** — IDOR (改 ID)、Mass Assignment (注入 admin=true)、GraphQL 内省
-- **JWT 攻击** — 算法替换 (RS256→HS256)、None 算法
-- **认证绕过** — SQL 注入登录、2FA 绕过、OAuth redirect_uri 劫持
+- **JWT 攻击** — 算法替换 (RS256→HS256)、None 算法、kid 注入
+- **OAuth 2.0** — redirect_uri 劫持、PKCE 绕过、Token 刷新滥用
+- **SAML** — XML Signature Wrapping、断言注入、NameID 修改
+- **认证绕过** — SQL 注入登录、2FA 绕过、SSO 绕过
 - **文件上传绕过** — 双扩展名 (.php.jpg)、MIME 绕过、.htaccess 注入
 - **SSRF 链** — 内网 Redis (Gopher) → 写 crontab/webshell、云元数据 (169.254.169.254)
 - **SSTI** — {{7*7}} → 49 (Jinja2)、\${7*7} (Spring EL)、<#assign> (Freemarker)
 - **反序列化** — Java (ysoserial)、Python (pickle)、PHP (PHPGGC)
+- **XXE** — <!DOCTYPE> 外部实体 → SSRF/文件读取
 
 ### 数据库攻击
 - **Redis** — 未授权 → 写 SSH key / crontab / webshell
@@ -127,6 +136,8 @@ const ATTACK_KB_REF = `
 - **MySQL** — root 空密码 → INTO OUTFILE 写 webshell → UDF 提权
 - **PostgreSQL** — COPY FROM PROGRAM 执行命令
 - **Elasticsearch** — 9200 未授权 → RCE (旧版本)
+- **RabbitMQ** — guest:guest → 管理控制台 → 消息读写
+- **Kafka** — 9092 无认证 → 列出 topic → 注入恶意消息
 
 ### 内网 & AD 攻击
 - **Kerberoasting** — impacket-GetUserSPNs → hashcat 破解 TGS
@@ -134,12 +145,20 @@ const ATTACK_KB_REF = `
 - **Pass-the-Hash** — impacket-psexec/wmiexec -hashes
 - **NTLM Relay** — responder + impacket-ntlmrelayx
 - **DCSync** — impacket-secretsdump -just-dc
+- **ADCS 攻击** — certipy 扫描 ESC1/ESC8 → 请求域管理员证书
 - **BloodHound** — 找最短路径到 Domain Admin
 
 ### 云原生攻击
 - **Docker** — /var/run/docker.sock → 特权容器 → mount /:/host
 - **K8s** — API 未授权 → 创建 pod → ServiceAccount token
-- **CI/CD** — Jenkins Script Console → RCE
+- **AWS** — IMDS 元数据 → sts get-caller-identity → S3/EC2 访问
+- **Azure** — 托管身份 → ARM API → Key Vault/Storage
+- **CI/CD** — Jenkins Script Console → RCE; GitHub Actions → secrets 窃取
+
+### LLM 应用攻击
+- **Prompt 注入** — 修改用户输入 → LLM 执行恶意操作
+- **间接注入** — 网页内容/文件 → RAG 检索 → 污染输出
+- **工具调用滥用** — LLM 有 Bash 权限 → prompt 注入 → 命令执行
 
 ### 超时/连接失败处理
 - ETIMEDOUT → 端口可能不可达或被防火墙拦截，不要无限重试
