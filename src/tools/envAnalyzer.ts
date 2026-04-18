@@ -9,6 +9,7 @@
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
+import { executeCommand } from './shellSession.js'
 
 const exec = promisify(execCb)
 
@@ -213,7 +214,6 @@ export class EnvAnalyzerTool implements Tool {
 
     let detectedWAF: string | null = null
     let detectedConfidence = 0
-    let responseSamples: string[] = []
 
     for (const probe of probes) {
       try {
@@ -221,7 +221,6 @@ export class EnvAnalyzerTool implements Tool {
           `curl -sS -m 8 -D - ${probe.headers} "${probe.url}" 2>&1 | head -50`,
         )
         const combined = stdout + stderr
-        responseSamples.push(combined.slice(0, 500))
 
         for (const sig of WAF_SIGNATURES) {
           let matchCount = 0
@@ -275,94 +274,111 @@ export class EnvAnalyzerTool implements Tool {
 
   // ── EDR Detection (requires shell access) ──────────────────────────────
 
-  private async detectEDR(shellSessionId: string, context: ToolContext): Promise<{ detected: boolean; report: string; recommendations: string[] }> {
+  private async detectEDR(shellSessionId: string, _context: ToolContext): Promise<{ detected: boolean; report: string; recommendations: string[] }> {
     const detected: string[] = []
     const recommendations: string[] = []
 
-    try {
-      const { stdout: procList } = await exec(`tasklist 2>/dev/null || ps aux 2>/dev/null | head -50 || true`)
+    const { output: procList, success } = await executeCommand(
+      shellSessionId,
+      `tasklist 2>/dev/null || ps aux 2>/dev/null | head -100 || true`,
+      { timeout: 10_000 },
+    )
 
-      for (const edr of EDR_INDICATORS) {
-        let found = false
-        for (const pattern of edr.processes) {
-          if (pattern.test(procList)) {
-            detected.push(edr.product)
-            found = true
-            break
-          }
-        }
-        if (found) {
-          recommendations.push(`${edr.product} confirmed. AMSI bypass should be performed before any PowerShell execution`)
-          recommendations.push(`Use TechniqueGenerator({ technique: "amsi_bypass", platform: "windows", analysis_context: { edr: "${edr.product}" } })`)
-          recommendations.push('Avoid disk writes — use in-memory execution or fileless techniques')
-          if (edr.product === 'Windows Defender') {
-            recommendations.push('Defender: consider adding exclusion path via Add-MpPreference -ExclusionPath')
-          }
+    if (!success || !procList.trim()) {
+      return {
+        detected: false,
+        report: `[EDR] Shell session "${shellSessionId}" unreachable or returned no output.\nRun manually:\n  tasklist | findstr /I "CSFalcon Sentinel MsMpEng ccSvc RepMgr avp"\n  sc query | findstr /I "WinDefend CrowdStrike Sentinel Trend"\n  driverquery | findstr /I "WdFilter CsDeviceControl SRTSP"`,
+        recommendations: ['Assume EDR presence on Windows targets. Prepare AMSI bypass proactively.'],
+      }
+    }
+
+    for (const edr of EDR_INDICATORS) {
+      let found = false
+      for (const pattern of edr.processes) {
+        if (pattern.test(procList)) {
+          detected.push(edr.product)
+          found = true
+          break
         }
       }
-    } catch { /* not Windows or no shell */ }
+      if (found) {
+        recommendations.push(`${edr.product} confirmed. AMSI bypass should be performed before any PowerShell execution`)
+        recommendations.push(`Use TechniqueGenerator({ technique: "amsi_bypass", platform: "windows", analysis_context: { edr: "${edr.product}" } })`)
+        recommendations.push('Avoid disk writes — use in-memory execution or fileless techniques')
+        if (edr.product === 'Windows Defender') {
+          recommendations.push('Defender: consider adding exclusion path via Add-MpPreference -ExclusionPath')
+        }
+      }
+    }
 
     if (detected.length > 0) {
       return {
         detected: true,
-        report: `[EDR] Detected: ${detected.join(', ')}\nMethod: process list matching`,
+        report: `[EDR] Detected on ${shellSessionId}: ${detected.join(', ')}\nMethod: remote process list matching`,
         recommendations,
       }
     }
 
     return {
       detected: false,
-      report: `[EDR] Unable to remotely detect EDR (no shell access). After obtaining shell, run:\ntasklist | findstr /I "CSFalcon Sentinel MsMpEng ccSvc RepMgr avp"\nsc query | findstr /I "WinDefend CrowdStrike Sentinel Trend"\ndriverquery | findstr /I "WdFilter CsDeviceControl SRTSP"`,
-      recommendations: ['For Windows targets, assume EDR presence by default. Prepare AMSI bypass proactively.'],
+      report: `[EDR] No known EDR processes detected on ${shellSessionId}`,
+      recommendations: [],
     }
   }
 
   // ── Sandbox Detection (requires shell access) ──────────────────────────
 
-  private async detectSandbox(shellSessionId: string, context: ToolContext): Promise<{ detected: boolean; report: string; recommendations: string[] }> {
+  private async detectSandbox(shellSessionId: string, _context: ToolContext): Promise<{ detected: boolean; report: string; recommendations: string[] }> {
     const indicators: string[] = []
     const recommendations: string[] = []
 
-    try {
-      const { stdout: cpuInfo } = await exec(`nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "unknown"`)
-      const cpuCount = parseInt(cpuInfo.trim()) || 99
-      if (cpuCount <= 2) {
-        indicators.push(`CPU cores: ${cpuCount} (≤2 may indicate sandbox/VM)`)
-      }
+    const remoteExec = async (cmd: string) =>
+      executeCommand(shellSessionId, cmd, { timeout: 8_000 })
 
-      const { stdout: memInfo } = await exec(`free -m 2>/dev/null | grep Mem | awk '{print $2}' || echo "unknown"`)
-      const memMb = parseInt(memInfo.trim()) || 99999
-      if (memMb < 2048) {
-        indicators.push(`Memory: ${memMb}MB (<2GB may indicate sandbox/VM)`)
-      }
+    const { output: cpuInfo } = await remoteExec(
+      `nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "unknown"`,
+    )
+    const cpuCount = parseInt(cpuInfo.trim()) || 99
+    if (cpuCount <= 2) {
+      indicators.push(`CPU cores: ${cpuCount} (≤2 may indicate sandbox/VM)`)
+    }
 
-      const { stdout: hostname } = await exec(`hostname 2>/dev/null || echo ""`)
-      for (const su of SANDBOX_USERNAMES) {
-        if (hostname.toLowerCase().includes(su)) {
-          indicators.push(`Hostname contains "${su}", possible sandbox environment`)
-          break
-        }
-      }
+    const { output: memInfo } = await remoteExec(
+      `free -m 2>/dev/null | grep Mem | awk '{print $2}' || echo "unknown"`,
+    )
+    const memMb = parseInt(memInfo.trim()) || 99999
+    if (memMb < 2048) {
+      indicators.push(`Memory: ${memMb}MB (<2GB may indicate sandbox/VM)`)
+    }
 
-      const { stdout: macInfo } = await exec(`ip link show 2>/dev/null | grep ether | head -3 || ifconfig 2>/dev/null | grep ether | head -3 || true`)
-      for (const prefix of VM_MAC_PREFIXES) {
-        if (macInfo.toLowerCase().includes(prefix.toLowerCase())) {
-          indicators.push(`MAC address prefix ${prefix}, possible virtual machine`)
-          break
-        }
+    const { output: hostname } = await remoteExec(`hostname 2>/dev/null || echo ""`)
+    for (const su of SANDBOX_USERNAMES) {
+      if (hostname.toLowerCase().includes(su)) {
+        indicators.push(`Hostname contains "${su}", possible sandbox environment`)
+        break
       }
-    } catch { /* not accessible */ }
+    }
+
+    const { output: macInfo } = await remoteExec(
+      `ip link show 2>/dev/null | grep ether | head -3 || ifconfig 2>/dev/null | grep ether | head -3 || true`,
+    )
+    for (const prefix of VM_MAC_PREFIXES) {
+      if (macInfo.toLowerCase().includes(prefix.toLowerCase())) {
+        indicators.push(`MAC address prefix ${prefix}, possible virtual machine`)
+        break
+      }
+    }
 
     if (indicators.length > 0) {
       recommendations.push('Sandbox/VM indicators detected. Consider delayed execution or legitimate process injection techniques')
-      recommendations.push('Avoid obvious malicious behavior patterns (rapid port scanning,大量 network connections)')
+      recommendations.push('Avoid obvious malicious behavior patterns (rapid port scanning, mass network connections)')
       return {
         detected: true,
-        report: `[Sandbox] Detected indicators:\n${indicators.map((i) => `  - ${i}`).join('\n')}`,
+        report: `[Sandbox] Detected indicators on ${shellSessionId}:\n${indicators.map((i) => `  - ${i}`).join('\n')}`,
         recommendations,
       }
     }
 
-    return { detected: false, report: '[Sandbox] No sandbox indicators detected', recommendations: [] }
+    return { detected: false, report: `[Sandbox] No sandbox indicators detected on ${shellSessionId}`, recommendations: [] }
   }
 }

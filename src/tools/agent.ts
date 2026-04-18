@@ -636,11 +636,14 @@ export class GetDispatchResultTool implements Tool {
       return { content: `Dispatch ${id} 仍在 ${record.status} 状态，尚无结果。请稍后重试。`, isError: false }
     }
     if (record.status === 'failed') {
+      _dispatchManager.clearCompleted()
       return { content: `Dispatch ${id} 失败: ${record.error ?? '未知错误'}`, isError: true }
     }
-    return {
+    const output = {
       content: `[${record.agentType}] "${id}" 结果:\n\n${record.result ?? '(无输出)'}`,
       isError: false,
     }
+    _dispatchManager.clearCompleted()
+    return output
   }
 }

@@ -260,9 +260,7 @@ const CONCURRENCY_SAFE_TOOLS = new Set([
   'C2',          // parallel — deploy_listener / get_ip / list_sessions are safe
   'ShellSession', // parallel — listen / list / exec on different sessions
   'TmuxSession',  // parallel — new / list / capture on different sessions
-  'BypassDetector', // parallel — read-only detection probes
-  'PayloadFactory',   // parallel — text-only payload generation
-  'EnvAnalyzer',      // parallel — read-only environment analysis
+  'EnvAnalyzer',        // parallel — read-only detection probes
   'TechniqueGenerator', // parallel — text-only technique generation
 ])
 
@@ -318,8 +316,6 @@ export class ExecutionEngine {
   private eventLog: EngineConfig['eventLog']
   /** Context budget manager — may be undefined if not configured */
   private contextBudget: EngineConfig['contextBudget']
-  /** Dispatch manager — may be undefined if not configured */
-  private dispatchManager: EngineConfig['dispatchManager']
   /** Knowledge extractor — may be undefined if not configured */
   private knowledgeExtractor: KnowledgeExtractor | null = null
 
@@ -335,7 +331,6 @@ export class ExecutionEngine {
     this.toolCache = config.toolCache || new ToolCache()
     this.eventLog = config.eventLog
     this.contextBudget = config.contextBudget
-    this.dispatchManager = config.dispatchManager
 
     // Initialize knowledge extractor if knowledge base is configured
     if (config.knowledgeBase) {
@@ -477,17 +472,18 @@ export class ExecutionEngine {
         const maxCtxTokens = this.config.maxContextTokens ?? MODEL_MAX_CONTEXT_TOKENS
 
         // Use ContextBudgetManager if available, else fall back to percentage-based thresholds
+        const baseCtxState = calculateContextState(messages, maxCtxTokens)
         let ctxState: ReturnType<typeof calculateContextState> & { strategy?: CompressionStrategy }
         if (this.contextBudget) {
-          const budgetState = this.contextBudget.evaluate(maxCtxTokens)
+          const budgetState = this.contextBudget.evaluate(baseCtxState.currentTokens)
           ctxState = {
-            ...calculateContextState(messages, maxCtxTokens),
+            ...baseCtxState,
             strategy: budgetState.strategy,
             shouldCompact: budgetState.shouldCompact,
             shouldWarn: budgetState.shouldWarn,
           }
         } else {
-          ctxState = calculateContextState(messages, maxCtxTokens) as ReturnType<typeof calculateContextState> & { strategy?: CompressionStrategy }
+          ctxState = baseCtxState as ReturnType<typeof calculateContextState> & { strategy?: CompressionStrategy }
         }
 
         // Show context stats every 5 iterations (main agent only, not sub-agents)
