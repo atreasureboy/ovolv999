@@ -32,10 +32,7 @@ import { ExecutionEngine } from '../src/core/engine.js'
 import { Renderer } from '../src/ui/renderer.js'
 import { InputHandler, readStdin } from '../src/ui/input.js'
 import type { EngineConfig, OpenAIMessage } from '../src/core/types.js'
-import { registerAgentFactory, setDispatchManager } from '../src/tools/agent.js'
-import { DispatchManager } from '../src/core/dispatch.js'
-import { loadMcpTools, disconnectAll } from '../src/services/mcp/loader.js'
-import type { ConnectedMcpClient } from '../src/services/mcp/client.js'
+import { registerAgentFactory } from '../src/tools/agent.js'
 import { loadSettings } from '../src/config/settings.js'
 import { HookRunner, NoopHookRunner } from '../src/config/hooks.js'
 import { loadSkills, expandSkillPrompt } from '../src/skills/loader.js'
@@ -43,14 +40,10 @@ import type { Skill } from '../src/skills/loader.js'
 import { loadOvogoMd } from '../src/config/ovogomd.js'
 import { getMemoryDir, buildMemorySystemSection, getMemoryStats } from '../src/memory/index.js'
 import { buildFullSystemPrompt } from '../src/prompts/system.js'
-import { ProgressTracker } from '../src/core/progressTracker.js'
-import { ToolCache } from '../src/core/toolCache.js'
 import { EventLog } from '../src/core/eventLog.js'
 import { SemanticMemory } from '../src/core/semanticMemory.js'
 import { EpisodicMemory } from '../src/core/episodicMemory.js'
 import { ContextBudgetManager } from '../src/core/contextBudget.js'
-import { KnowledgeBase } from '../src/core/knowledgeBase.js'
-import { BattleOrchestrator } from '../src/core/orchestrator.js'
 import { tmuxLayout } from '../src/ui/tmuxLayout.js'
 
 const VERSION = '0.1.0'
@@ -66,7 +59,6 @@ interface Args {
   cwd: string
   help: boolean
   version: boolean
-  orchestrator: boolean
 }
 
 const MAX_RECENT_HISTORY_MESSAGES = 120
@@ -109,14 +101,12 @@ function parseArgs(argv: string[]): Args {
   let cwd = process.env.OVOGO_CWD ?? process.cwd()
   let help = false
   let version = false
-  let orchestrator = false
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
     switch (arg) {
       case '--help': case '-h': help = true; break
       case '--version': case '-v': case '-V': version = true; break
-      case '--orchestrator': orchestrator = true; break
       case '--model': case '-m': model = args[++i] ?? model; break
       case '--max-iter': maxIter = parseInt(args[++i] ?? '30', 10); break
       case '--cwd': cwd = args[++i] ?? cwd; break
@@ -124,7 +114,7 @@ function parseArgs(argv: string[]): Args {
         if (!arg.startsWith('-')) task = task ? task + ' ' + arg : arg
     }
   }
-  return { task, model, maxIter, cwd, help, version, orchestrator }
+  return { task, model, maxIter, cwd, help, version }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -141,7 +131,6 @@ OPTIONS
   -m, --model <model>    LLM model  (env: OVOGO_MODEL, default: gpt-4o)
   --max-iter <n>         Think-Act-Observe max cycles  (env: OVOGO_MAX_ITER, default: 200)
   --cwd <path>           Working directory  (env: OVOGO_CWD, default: cwd)
-  --orchestrator         State machine mode — LLM supervisor dispatches agents across pentest phases
   -v, --version          Print version and exit
   -h, --help             Show this help
 
@@ -150,7 +139,7 @@ ENVIRONMENT
   OPENAI_BASE_URL        Optional — compatible endpoint URL
 
 TOOLS
-  Bash          Execute shell commands and pentest tools
+  Bash          Execute shell commands
   Read          Read file contents
   Write         Write/create files
   Edit          Precise string replacement in files
@@ -160,9 +149,9 @@ TOOLS
   WebFetch      Fetch URL content as plain text
   WebSearch     Search the web
   Agent         Spawn a sub-agent (explore/plan/code-reviewer/general-purpose)
-  FindingWrite  Record a vulnerability finding (persisted to .ovogo/findings/)
-  FindingList   List all findings with optional filters
-  WeaponRadar   Semantic search over 22W internal Nuclei PoC database (BGE-M3)
+  C2            C2 framework interface (Sliver/Metasploit)
+  EnvAnalyzer   WAF/EDR/sandbox detection
+  TechniqueGenerator  Binary weaponization with evasion techniques
 
 REPL COMMANDS
   /plan <task>   Run task in plan mode (read-only analysis + confirm before execute)
@@ -185,9 +174,9 @@ HOOKS (configure in .ovogo/settings.json)
 
 EXAMPLES
   ovogogogo
-  ovogogogo "fix the TypeScript errors in src/"
-  ovogogogo -m gpt-4o --cwd /my/project "write unit tests"
-  echo "install and test" | ovogogogo
+  ovogogogo "compile evasion payload for target"
+  ovogogogo -m gpt-4o --cwd /my/project "generate AMSI bypass payload"
+  echo "compile payload" | ovogogogo
 `)
 }
 
@@ -588,7 +577,7 @@ async function runTask(
 // ─────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { task, model, maxIter, cwd: rawCwd, help, version, orchestrator: useOrchestrator } = parseArgs(process.argv)
+  const { task, model, maxIter, cwd: rawCwd, help, version } = parseArgs(process.argv)
   const cwd = resolve(rawCwd)
 
   // Load skills early so --help can list them
@@ -667,68 +656,27 @@ async function main(): Promise<void> {
     }
   }
 
-  // Initialize knowledge base (global + project-level)
-  const projectSlug = cwd.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32)
-  const projectKnowledgeDir = join(process.env.HOME ?? '', '.ovogo', 'projects', projectSlug, 'knowledge')
-  const knowledgeBase = new KnowledgeBase(projectKnowledgeDir)
-  const kbStats = knowledgeBase.stats()
-  const kbTotal = Object.values(kbStats).reduce((a, b) => a + b, 0)
-  if (kbTotal > 0) {
-    renderer.info(`Knowledge Base: ${kbTotal} entries (${kbStats.attack_patterns} attack, ${kbStats.cve_notes} CVE, ${kbStats.tool_combos} combos, ${kbStats.target_profiles} profiles)`)
-  } else {
-    renderer.info(`Knowledge Base: empty — will grow from sessions`)
-  }
-
-  // Query relevant knowledge for system prompt injection
-  let knowledgePrompt = ''
-  if (kbTotal > 0) {
-    const targetForQuery = engagement?.targets?.[0] ?? ''
-    const entries = targetForQuery
-      ? knowledgeBase.searchByTarget(targetForQuery, 15)
-      : knowledgeBase.recommend('', 10).map((e) => ({ type: 'attack_patterns' as const, data: e }))
-    if (entries.length > 0) {
-      knowledgePrompt = knowledgeBase.toPrompt(entries)
-      renderer.info(`Knowledge: ${entries.length} entries injected into system prompt`)
-    }
-  }
-
   // Create per-session output directory
   const primaryTarget = engagement?.targets?.[0]
   const sessionDir = createSessionDir(cwd, primaryTarget)
   renderer.info(`Session dir: ${sessionDir}`)
 
-  // Initialize sub-agent tmux monitor (creates background tmux session for agent windows)
+  // Initialize sub-agent tmux monitor
   const agentLogDir = join(sessionDir, 'agent-logs')
   const layoutReady = tmuxLayout.init(agentLogDir)
   if (layoutReady) {
     renderer.info(`Agent 监控: ${tmuxLayout.sessionHint()}`)
   }
 
-  // Build the full system prompt once (OVOGO.md + memory + engagement + sessionDir + knowledge)
+  // Build the full system prompt once
   const memorySection = buildMemorySystemSection(memoryDir)
-  const systemPrompt = buildFullSystemPrompt(cwd, ovogoMdFiles, memorySection, engagement, sessionDir, knowledgePrompt)
-
-  // Load MCP servers (non-fatal if config missing)
-  let mcpConnections: ConnectedMcpClient[] = []
-  const { tools: mcpTools, connections, errors: mcpErrors } = await loadMcpTools(cwd)
-  mcpConnections = connections
-
-  if (mcpTools.length > 0) {
-    renderer.info(`MCP: ${mcpTools.length} tool(s) loaded from ${connections.length} server(s)`)
-  }
-  for (const e of mcpErrors) {
-    renderer.warn(`MCP: "${e.server}" failed — ${e.error}`)
-  }
+  const systemPrompt = buildFullSystemPrompt(cwd, ovogoMdFiles, memorySection, engagement, sessionDir)
 
   // Initialize optimization components
-  const progressTracker = new ProgressTracker()
-  const toolCache = new ToolCache()
-
-  // ── New systems: Event Log, Memory, Context Budget, Dispatch ──
   const eventLog = new EventLog(sessionDir)
   renderer.info(`EventLog: ${eventLog.getFilePath()}`)
 
-  // Remove duplicate projectSlug — already declared above
+  const projectSlug = cwd.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32)
   const semanticMemory = new SemanticMemory(join(process.env.HOME ?? '', '.ovogo', 'projects', projectSlug))
   const episodicMemory = new EpisodicMemory(join(process.env.HOME ?? '', '.ovogo', 'projects', projectSlug))
 
@@ -742,14 +690,6 @@ async function main(): Promise<void> {
     reserved: 8_192,
   })
 
-  const dispatchManager = new DispatchManager()
-  setDispatchManager(dispatchManager)
-
-  // Register dispatch completion callback — inject completed results into next turn
-  dispatchManager.onCompletion((record) => {
-    renderer.info(`[Dispatch] ${record.id} (${record.agentType}) → ${record.status}`)
-  })
-
   const config: EngineConfig = {
     model,
     apiKey,
@@ -757,24 +697,15 @@ async function main(): Promise<void> {
     maxIterations: maxIter,
     cwd,
     permissionMode: 'auto',
-    extraTools: mcpTools,
     hookRunner,
     systemPrompt,
-    sessionDir,   // injected into sub-agent prompts via registerAgentFactory
+    sessionDir,
     primaryTarget,
-    engagementTargets: engagement?.targets,
-    outOfScopeTargets: engagement?.out_of_scope,
-    engagementPhase: engagement?.phase,
-    progressTracker,
-    toolCache,
-    coordinatorMode: true,
     maxContextTokens: maxCtxTokens,
     eventLog,
     contextBudget,
-    dispatchManager,
     semanticMemory,
     episodicMemory,
-    knowledgeBase: kbTotal > 0 ? knowledgeBase : undefined,
   }
 
   // Plan-mode config: same system prompt + planMode=true (engine filters write tools)
@@ -792,40 +723,16 @@ async function main(): Promise<void> {
     renderer,
   )
 
-  // Cleanup MCP connections + tmux session on exit
+  // Cleanup tmux session on exit
   let cleanedUp = false
   const cleanup = () => {
     if (cleanedUp) return
     cleanedUp = true
     tmuxLayout.destroy()
-    disconnectAll(mcpConnections).catch(() => {})
   }
   process.on('exit', cleanup)
   process.on('SIGTERM', () => { cleanup(); process.exit(0) })
   process.on('SIGHUP',  () => { cleanup(); process.exit(0) })
-
-  // ── Orchestrator mode: state machine supervisor ──────────────
-  if (useOrchestrator) {
-    const primaryTarget = engagement?.targets?.[0] ?? ''
-    const orchestratorInstance = new BattleOrchestrator(
-      {
-        model,
-        apiKey,
-        baseURL: process.env.OPENAI_BASE_URL,
-        sessionDir,
-        primaryTarget: primaryTarget || undefined,
-        engagement,
-        cwd,
-      },
-      renderer,
-      engine,
-      maxIter,
-    )
-
-    const initialTask = task ?? '对目标进行完整渗透测试'
-    await orchestratorInstance.run(initialTask)
-    return
-  }
 
   // Pipe input?
   if (!process.stdin.isTTY) {

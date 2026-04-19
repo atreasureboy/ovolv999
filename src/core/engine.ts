@@ -33,11 +33,7 @@ import { createTools, findTool, getToolDefinitions } from '../tools/index.js'
 import { getPlanModePrefix } from '../prompts/system.js'
 import type { Renderer } from '../ui/renderer.js'
 import { maybeCompact, calculateContextState, MODEL_MAX_CONTEXT_TOKENS } from './compact.js'
-import { ProgressTracker } from './progressTracker.js'
-import { ToolCache } from './toolCache.js'
-import type { EventLogEntry } from './eventLog.js'
 import { ContextBudgetManager, CompressionStrategy } from './contextBudget.js'
-import { KnowledgeExtractor } from './knowledgeExtractor.js'
 
 const MAX_TOOL_RESULT_LENGTH = 20_000
 
@@ -51,24 +47,17 @@ const CRITIC_CONTEXT_MESSAGES = 24
 /** Max tokens the critic can produce */
 const CRITIC_MAX_TOKENS = 400
 
-const CRITIC_SYSTEM_PROMPT = `你是一个渗透测试会话的批判性监督 agent。
+const CRITIC_SYSTEM_PROMPT = `你是一个二进制武器化会话的批判性监督 agent。
 你只阅读操作历史，不执行操作。你的职责是发现以下常见失误并给出简短纠正：
 
-1. **PoC 未执行** — WeaponRadar 返回了 poc_code，但随后没有把 PoC 写入文件并用 nuclei 执行
-2. **工具降级** — 遇到 "command not found" / 模板找不到 / 工具缺失，直接改用手动 curl/wget 测试，而非先安装工具
-3. **重要发现被遗忘** — 之前扫描/发现的端口、服务版本、凭证、漏洞没有被后续步骤跟进利用
-4. **任务偏离** — 偏离了最初的目标，陷入无关或低价值操作
-5. **重复劳动** — 正在重复已经完成过的操作（相同命令、相同扫描）
-6. **交互式进程阻塞** — 使用 msfconsole / nc shell / python REPL 等交互式进程但未用 TmuxSession，导致 Bash 调用超时
-7. **防御者思维** — 输出了"建议的修复措施"/"建议修复"/"修复建议"/"应该修复"等内容，或建议目标方打补丁/加固配置，这是红队工具，只攻不守
-8. **提前终止扫描** — 后台扫描（nuclei/nmap/hydra）仍在 ps aux 中运行，却宣称"扫描完成"或进行最终总结，应继续等待并读取扫描结果
-9. **满足于信息泄露** — 发现目录列表/配置文件等低风险信息后就停止推进，未尝试利用这些信息进一步拿 shell（如从配置文件提取凭证、寻找可写路径、上传 webshell）
-10. **poc_code 当 nuclei 模板** — 把 WeaponRadar 返回的 poc_code 写成 .yaml 文件然后 nuclei -t 执行，这几乎必然失败（格式不兼容）；正确做法是从 poc_code 提取 endpoint+payload，改写为 curl/python 手动测试
-11. **绕过 MultiAgent 直接扫描** — 主 agent 用 Bash / MultiScan 直接运行 nmap / nuclei / hydra / httpx 等扫描工具，而不是调用 MultiAgent 分发给专用子 agent；主 agent 是协调者，扫描应由子 agent（dns-recon / port-scan / web-vuln 等）执行
-12. **发现漏洞不利用** — 确认漏洞存在（RCE/SQLi/文件上传）后只是 FindingWrite 就停止，没有继续利用执行命令、上传 webshell、读取 flag；靶场任务要求拿到 flag，不是写报告
-13. **没有找 flag** — 已经拿到命令执行权限（RCE/shell/webshell），但没有执行 find / -name flag* 或 cat /flag 等命令去寻找 flag 内容
-14. **主动杀掉后台扫描** — 执行了 killall nuclei / killall nmap / kill -9 <pid> 等命令强制终止了正在运行的后台扫描进程（nuclei/nmap/hydra/ffuf/masscan），随后重新启动扫描或继续任务；应当让原有扫描进程跑完并读取其结果，而不是杀掉重来；这一行为等同于自毁进度
-15. **主agent亲自执行** — 主agent直接调用Bash/MultiScan/ShellSession/TmuxSession/Write/Edit等执行类工具，而不是通过Agent/MultiAgent委派子agent；主agent是协调者，必须委派子agent执行所有具体操作
+1. **绕过缺失** — 针对已知防护（WAF/EDR/AMSI）没有先执行绕过就投递 payload
+2. **技术栈偏离** — 生成的 payload 指纹明显、无随机化、未参考 Havoc/Sliver/APT28 技术
+3. **EnvAnalyzer 未执行** — 对新目标没有先做环境检测就直接武器化
+4. **TechniqueGenerator 滥用** — 多次生成相同技术的 payload 没有引入新绕过组合
+5. **交互式进程阻塞** — 使用 msfconsole/sliver 等交互式进程但未用 TmuxSession，导致 Bash 调用超时
+6. **防御者思维** — 输出了"建议修复"/"加固配置"等内容，这是红队工具，只攻不守
+7. **文件未保存** — 生成的 payload/脚本没有保存到 session 目录
+8. **重复劳动** — 正在重复已经完成过的操作
 
 输出规则：
 - 发现问题：用 "⚠️ [问题] {描述}" + "↳ [纠正] {具体应执行什么}" 格式，最多 3 条
@@ -149,132 +138,22 @@ interface ToolBatch {
 const PLAN_MODE_TOOLS = new Set(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'])
 
 /**
- * Coordinator mode — tools the main agent is allowed to use directly.
- * Everything else must be delegated to sub-agents via Agent/MultiAgent.
- *
- * Rationale: the main agent should be an orchestrator, not an executor.
- * Scanning, exploitation, and post-exploitation are sub-agent work.
- * The main agent reads results, makes decisions, and dispatches tasks.
- */
-const COORDINATOR_ALLOWED_TOOLS = new Set([
-  // Delegation (core orchestrator tools)
-  'Agent', 'MultiAgent',
-  // Async dispatch
-  'DispatchAgent', 'CheckDispatch', 'GetDispatchResult',
-  // Intelligence / lookup (fast, no side effects)
-  'WeaponRadar', 'WebSearch', 'WebFetch',
-  // Reading sub-agent outputs and documents
-  'Read', 'Glob', 'Grep', 'DocRead',
-  // Progress tracking
-  'FindingWrite', 'FindingList', 'TodoWrite',
-  // C2 coordination (get_ip, list_sessions, list_listeners — read-only actions)
-  'C2',
-  // Bash — read-only commands only (whitelist enforced at execution time)
-  'Bash',
-])
-
-/**
- * In coordinator mode, these agent types should be launched in parallel via MultiAgent
- * unless there is an explicit serial dependency reason.
- */
-const PARALLEL_FIRST_AGENT_TYPES = new Set([
-  'recon', 'vuln-scan',
-  'manual-exploit', 'tool-exploit', 'c2-deploy',
-  'target-recon', 'privesc',
-  'tunnel', 'internal-recon', 'lateral',
-])
-
-/** Coordinator must not delegate core work to generic helper agents. */
-const FORBIDDEN_COORDINATOR_AGENT_TYPES = new Set([
-  'general-purpose', 'explore', 'plan', 'code-reviewer',
-])
-
-/**
- * Coordinator mode — Bash read-only command whitelist.
- * The main agent needs these to monitor sub-agent progress via file inspection
- * without being able to launch scans or exploits directly.
- */
-const COORDINATOR_BASH_WHITELIST = [
-  // File reading / inspection
-  /^tail\b/, /^head\b/, /^cat\b/, /^wc\b/, /^less\b/, /^more\b/, /^bat\b/,
-  // Search
-  /^grep\b/, /^egrep\b/, /^fgrep\b/, /^zgrep\b/,
-  // Listing / filesystem
-  /^ls\b/, /^stat\b/, /^file\b/, /^du\b/, /^df\b/, /^find\b/, /^tree\b/,
-  // Process monitoring
-  /^ps\b/, /^top\b/, /^htop\b/, /^uptime\b/, /^free\b/,
-  // Identity / system info
-  /^whoami\b/, /^id\b/, /^hostname\b/, /^uname\b/, /^who\b/, /^w\b/,
-  // Safe output
-  /^echo\b/, /^printf\b/,
-  // Log / session monitoring
-  /^sed\s+.*-n\b/,  // sed -n is safe (no -i)
-  /^awk\b/,
-  // Sorting / filtering
-  /^sort\b/, /^uniq\b/, /^diff\b/, /^cmp\b/,
-  // Network info (read-only)
-  /^ss\b/, /^netstat\b/, /^ip\s+(addr|route|link|neigh)\b/,
-  // But block dangerous network commands
-]
-
-/** Regexes for commands the coordinator must NEVER run via Bash. */
-const COORDINATOR_BASH_BLACKLIST = [
-  /nmap\b/, /masscan\b/, /naabu\b/,        // port scanning
-  /nuclei\b/, /nikto\b/, /ffuf\b/,          // vuln scanning
-  /sqlmap\b/, /hydra\b/, /kerbrute\b/,      // exploitation / brute-force
-  /msfconsole\b/, /msfvenom\b/, /metasploit\b/,  // C2
-  /sliver\b/, /cobalt.*strike\b/,           // C2
-  /chisel\b/, /stowaway\b/, /proxychains\b/, /socat\b/, // tunneling
-  /curl.*(-o\s|-O\b|--output\b)/,           // curl downloading files
-  /wget\b/, /fetch\b/,                      // downloading
-  /chmod\b.*\+x/, /chown\b/,                // permission changes
-  /apt\s+install\b/, /apt-get\s+install\b/, // package installation
-  /go\s+install\b/,                         // Go tool installation
-  /pip\s+install\b/, /pip3\s+install\b/,   // Python package installation
-  /rm\b.*(-rf|-fr)/,                        // destructive deletion
-  /find\b.*(-exec\b.*-c\s|delete\b)/,       // find destructive operations
-  /\|\s*(bash|sh|zsh)\b/,                   // pipe to shell
-  /\beval\b/, /source\s/, /\. /,            // code evaluation
-]
-
-/**
  * Concurrency-safe tools: run in parallel within a single LLM response.
  *
  * Rule: if the LLM emits multiple tool calls in one response, it intends them
  * to be independent — execute them all concurrently (Promise.all).
  *
- * Bash is included: the 64-core server has no issue with 50 concurrent shells.
- * Dependent commands should be chained inside a single Bash call (&&/;), not
- * split across separate Bash calls.
- *
- * Serial exceptions (own batch): Write, Edit, FindingWrite — these mutate shared
- * state and ordering may matter across calls.
+ * Serial exceptions (own batch): Write, Edit — these mutate shared state.
  */
 const CONCURRENCY_SAFE_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch',
-  'WeaponRadar', 'FindingList', 'MultiScan',
   'Bash',        // parallel — dependent ops should be chained with && in one call
   'Agent',       // parallel — multiple sub-agents run simultaneously via Promise.all
-  'MultiAgent',  // parallel — internally uses Promise.all; safe to batch with others
-  'DispatchAgent', 'CheckDispatch', 'GetDispatchResult', // parallel — dispatch management
   'C2',          // parallel — deploy_listener / get_ip / list_sessions are safe
   'ShellSession', // parallel — listen / list / exec on different sessions
   'TmuxSession',  // parallel — new / list / capture on different sessions
   'EnvAnalyzer',        // parallel — read-only detection probes
   'TechniqueGenerator', // parallel — text-only technique generation
-])
-
-/**
- * Tools whose results must never be cached.
- * - State-mutating tools: always re-execute
- * - Read/Glob/Grep: in a live pen-test environment files change after every Bash
- *   write — a 5-minute stale read would silently return old content and confuse
- *   the agent. Cache only truly static, expensive lookups (Web fetch, WeaponRadar).
- */
-const NO_CACHE_TOOLS = new Set([
-  'Bash', 'ShellSession', 'TmuxSession', 'C2',
-  'Write', 'Edit', 'FileEdit', 'FindingWrite',
-  'Read', 'Glob', 'Grep',   // filesystem changes mid-session — never stale-serve
 ])
 
 /**
@@ -308,16 +187,10 @@ export class ExecutionEngine {
   private currentTurnAbortController: AbortController | null = null
   /** Soft-interrupt flag: pause after current tool finishes, preserve history */
   private softAbortRequested = false
-  /** Progress tracker for long-running tools */
-  private progressTracker: ProgressTracker
-  /** Cache for tool execution results */
-  private toolCache: ToolCache
   /** Event log — may be undefined if not configured */
   private eventLog: EngineConfig['eventLog']
   /** Context budget manager — may be undefined if not configured */
   private contextBudget: EngineConfig['contextBudget']
-  /** Knowledge extractor — may be undefined if not configured */
-  private knowledgeExtractor: KnowledgeExtractor | null = null
 
   constructor(config: EngineConfig, renderer: Renderer) {
     this.config = config
@@ -326,16 +199,9 @@ export class ExecutionEngine {
       apiKey: config.apiKey,
       baseURL: config.baseURL,
     })
-    this.tools = createTools(config.extraTools ?? [], config.knowledgeBase)
-    this.progressTracker = config.progressTracker || new ProgressTracker()
-    this.toolCache = config.toolCache || new ToolCache()
+    this.tools = createTools(config.extraTools ?? [])
     this.eventLog = config.eventLog
     this.contextBudget = config.contextBudget
-
-    // Initialize knowledge extractor if knowledge base is configured
-    if (config.knowledgeBase) {
-      this.knowledgeExtractor = new KnowledgeExtractor(config.knowledgeBase)
-    }
   }
 
   /**
@@ -397,9 +263,6 @@ export class ExecutionEngine {
   ): Promise<{ result: TurnResult; newHistory: OpenAIMessage[] }> {
     const planMode = this.config.planMode ?? false
 
-    // Reset knowledge extractor state at the start of each new user turn
-    this.knowledgeExtractor?.reset()
-
     // Build system prompt: optional plan-mode prefix + pre-assembled prompt
     const baseSystemPrompt = this.config.systemPrompt ?? ''
     const systemPrompt = planMode
@@ -434,14 +297,10 @@ export class ExecutionEngine {
     ]
 
     // In plan mode, only expose read-only tools
-    // In coordinator mode, only expose orchestrator tools
     const allToolDefs = getToolDefinitions(this.tools)
-    const coordinatorMode = (this.config.coordinatorMode ?? false) && !!this.config.sessionDir
     let toolDefs = allToolDefs
     if (planMode) {
       toolDefs = allToolDefs.filter((t) => PLAN_MODE_TOOLS.has(t.function.name))
-    } else if (coordinatorMode) {
-      toolDefs = allToolDefs.filter((t) => COORDINATOR_ALLOWED_TOOLS.has(t.function.name))
     }
 
     let iterations = 0
@@ -651,7 +510,6 @@ export class ExecutionEngine {
         messages.push(assistantMsg)
 
         if (finishReason === 'stop' || rawToolCalls.length === 0) {
-          this.extractSessionKnowledge()
           return {
             result: { stopped: true, reason: 'stop_sequence', output: finalOutput },
             newHistory: messages,
@@ -755,20 +613,10 @@ export class ExecutionEngine {
     }
 
     this.renderer.warn(`Max iterations (${this.config.maxIterations}) reached`)
-    this.extractSessionKnowledge()
     return {
       result: { stopped: true, reason: 'max_iterations', output: finalOutput },
       newHistory: messages,
     }
-  }
-
-  /** Session-end knowledge extraction (best-effort, never throws) */
-  private extractSessionKnowledge(): void {
-    if (!this.knowledgeExtractor || !this.eventLog) return
-    try {
-      const events = this.eventLog.readAll()
-      this.knowledgeExtractor.extractFromSession(events)
-    } catch { /* best-effort — knowledge extraction must never break the engine */ }
   }
 
   private async executeToolCall(
@@ -785,257 +633,30 @@ export class ExecutionEngine {
       }
     }
 
-    // In coordinator mode, block execution tools (defence in depth — tool defs already filtered)
-    const coordinatorMode = (this.config.coordinatorMode ?? false) && !!this.config.sessionDir
-    if (coordinatorMode && !COORDINATOR_ALLOWED_TOOLS.has(toolName)) {
-      const agentSuggestion = this.getCoordinatorSuggestion(toolName, input)
-      return {
-        content: `⛔ 协调者模式：主 agent 不能直接使用 ${toolName}。${agentSuggestion}`,
-        isError: true,
-      }
-    }
-    // In coordinator mode, Bash is restricted to read-only commands
-    if (coordinatorMode && toolName === 'Bash') {
-      const cmd = String(input.command ?? '')
-      const bashCheck = this.checkCoordinatorBash(cmd)
-      if (!bashCheck.allowed) {
-        return {
-          content: `⛔ 协调者模式：Bash 命令 "${cmd}" 被拦截。\n原因: ${bashCheck.reason}\n主 agent 只能使用只读命令（tail/head/cat/wc/grep/ps/ls/stat/find等）查看子 agent 进度。`,
-          isError: true,
-        }
-      }
-    }
-    if (coordinatorMode) {
-      const violation = this.getCoordinatorDelegationViolation(toolName, input)
-      if (violation) {
-        return {
-          content: `⛔ 协调者委派策略：${violation}`,
-          isError: true,
-        }
-      }
-    }
-
-    // Check cache first (skip for non-cacheable tools)
-    if (!NO_CACHE_TOOLS.has(toolName)) {
-      const cachedResult = this.toolCache.get(toolName, input)
-      if (cachedResult) {
-        this.renderer.info(`[Cache hit] ${toolName}`)
-        return cachedResult
-      }
-    }
-
     const tool = findTool(this.tools, toolName)
     if (!tool) {
       return { content: `Unknown tool: ${toolName}`, isError: true }
     }
 
-    // Generate task ID for progress tracking
-    const taskId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-    // Declared outside try so catch block can reference it
-    const isLongRunningTool = ['Bash', 'MultiScan', 'WeaponRadar', 'WebSearch', 'C2'].includes(toolName)
+    const result = await tool.execute(input, context)
 
-    try {
-      if (isLongRunningTool) {
-        this.progressTracker.start(taskId, toolName, input)
-        this.renderer.info(`[Progress] Starting ${toolName} task ${taskId}`)
-      }
-
-      // Create a progress update function
-      const updateProgress = (progress: number, recoveryData?: Record<string, unknown>) => {
-        if (isLongRunningTool) {
-          this.progressTracker.update(taskId, progress, recoveryData)
-          this.renderer.info(`[Progress] ${toolName}: ${progress}%`)
-        }
-      }
-
-      // Add progress update to context
-      const enhancedContext: ToolContext & { updateProgress?: (progress: number, recoveryData?: Record<string, unknown>) => void } = {
-        ...context,
-        updateProgress
-      }
-
-      // Execute the tool
-      const result = await tool.execute(input, enhancedContext)
-
-      // Complete progress tracking
-      if (isLongRunningTool) {
-        this.progressTracker.complete(taskId, result.content)
-        this.renderer.info(`[Progress] ${toolName} completed`)
-      }
-
-      // Cache the result (only for cacheable, successful, non-error results)
-      if (!result.isError && !NO_CACHE_TOOLS.has(toolName)) {
-        const ttl = ['WebFetch', 'WebSearch'].includes(toolName)
-          ? 60 * 60 * 1000  // 1 hour for expensive web lookups
-          : undefined
-        this.toolCache.set(toolName, input, result, ttl)
-      }
-
-      // Write episodic memory entry
-      const epiMem = this.config.episodicMemory
-      if (epiMem) {
-        epiMem.write({
-          turn: 0,
-          toolName,
-          inputSummary: JSON.stringify(input).slice(0, 200),
-          resultSummary: result.content.slice(0, 300),
-          outcome: result.isError ? 'failure' : 'success',
-          timestamp: new Date().toISOString(),
-        })
-      }
-
-      // Real-time knowledge extraction
-      if (!result.isError && this.knowledgeExtractor) {
-        this.knowledgeExtractor.extractFromToolResult(toolName, input, result.content)
-      }
-
-      return result
-    } catch (err: unknown) {
-      // Handle error in progress tracking — use the same isLongRunningTool flag
-      if (isLongRunningTool) {
-        this.progressTracker.fail(taskId, (err as Error).message)
-        this.renderer.error(`[Progress] ${toolName} failed: ${(err as Error).message}`)
-      }
-
-      return {
-        content: `Tool ${toolName} threw exception: ${(err as Error).message}`,
-        isError: true,
-      }
+    // Write episodic memory entry
+    const epiMem = this.config.episodicMemory
+    if (epiMem && !result.isError) {
+      epiMem.write({
+        turn: 0,
+        toolName,
+        inputSummary: JSON.stringify(input).slice(0, 200),
+        resultSummary: result.content.slice(0, 300),
+        outcome: 'success',
+        timestamp: new Date().toISOString(),
+      })
     }
+
+    return result
   }
 
   getModel(): string {
     return this.config.model
-  }
-
-  /**
-   * When coordinator mode blocks a tool, suggest the correct sub-agent delegation.
-   */
-  private getCoordinatorSuggestion(toolName: string, input: Record<string, unknown>): string {
-    const TOOL_TO_AGENT: Record<string, { type: string; reason: string }> = {
-      'MultiScan': {
-        type: 'vuln-scan → web-vuln / service-vuln',
-        reason: 'MultiScan只是并行Bash，没有LLM推理。用MultiAgent启动vuln-scan子agent',
-      },
-      'ShellSession': {
-        type: 'manual-exploit / target-recon / privesc',
-        reason: '反弹shell交互是子agent的工作',
-      },
-      'TmuxSession': {
-        type: 'tool-exploit / c2-deploy',
-        reason: 'msfconsole/sliver交互是子agent的工作',
-      },
-      'Write': {
-        type: 'manual-exploit / report',
-        reason: '文件写入是子agent的工作',
-      },
-      'Edit': {
-        type: 'manual-exploit',
-        reason: '文件编辑是子agent的工作',
-      },
-    }
-
-    const suggestion = TOOL_TO_AGENT[toolName]
-    if (toolName === 'Bash') {
-      const cmd = String(input.command ?? '').toLowerCase()
-      if (cmd.includes('nmap') || cmd.includes('masscan') || cmd.includes('naabu')) {
-        return `扫描命令应由子agent执行。请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "侦察", prompt: "对 TARGET 进行端口扫描" }] })`
-      }
-      if (cmd.includes('nuclei') || cmd.includes('nikto') || cmd.includes('ffuf')) {
-        return `扫描命令应由子agent执行。请用 MultiAgent 启动 vuln-scan 子agent:\n  MultiAgent({ agents: [{ subagent_type: "vuln-scan", description: "漏洞扫描", prompt: "对 TARGET 进行漏洞扫描" }] })`
-      }
-      if (cmd.includes('sqlmap')) {
-        return `利用命令应由子agent执行。请用 MultiAgent 启动 manual-exploit 和 tool-exploit 子agent:\n  MultiAgent({ agents: [{ subagent_type: "manual-exploit", ... }, { subagent_type: "tool-exploit", ... }] })`
-      }
-      if (cmd.includes('hydra') || cmd.includes('kerbrute')) {
-        return `爆破命令应由子agent执行。请用 MultiAgent 启动 vuln-scan 子agent:\n  MultiAgent({ agents: [{ subagent_type: "vuln-scan", description: "认证攻击", prompt: "对 TARGET 进行弱口令测试" }] })`
-      }
-      if (cmd.includes('subfinder') || cmd.includes('dnsx') || cmd.includes('amass')) {
-        return `侦察命令应由子agent执行。请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "DNS侦察", prompt: "对 TARGET 进行DNS子域名枚举" }] })`
-      }
-      if (cmd.includes('httpx') || cmd.includes('katana')) {
-        return `探测命令应由子agent执行。请用 MultiAgent 启动 recon 子agent:\n  MultiAgent({ agents: [{ subagent_type: "recon", description: "Web探测", prompt: "对 TARGET 进行Web服务探测" }] })`
-      }
-      if (cmd.includes('chisel') || cmd.includes('stowaway') || cmd.includes('proxychains')) {
-        return `穿透命令应由子agent执行。请用 Agent 启动 tunnel 子agent:\n  Agent({ subagent_type: "tunnel", description: "内网穿透", prompt: "建立内网穿透代理" })`
-      }
-      if (cmd.includes('linpeas') || cmd.includes('winpeas')) {
-        return `提权命令应由子agent执行。请用 Agent 启动 privesc 子agent:\n  Agent({ subagent_type: "privesc", description: "权限提升", prompt: "在靶机上进行提权" })`
-      }
-      if (cmd.includes('find') && cmd.includes('flag')) {
-        return `Flag搜索应由子agent执行。请用 Agent 启动 flag-hunter 子agent:\n  Agent({ subagent_type: "flag-hunter", description: "Flag收集", prompt: "搜索并收集flag" })`
-      }
-      return `只读命令（tail/cat/grep/ps/wc等）可直接使用。扫描/利用命令应通过 Agent 或 MultiAgent 委派子agent执行。`
-    }
-
-    if (!suggestion) {
-      return `请通过 Agent 或 MultiAgent 委派子agent执行。`
-    }
-
-    return `${suggestion.reason}。请用 MultiAgent/Agent 启动 ${suggestion.type} 子agent。`
-  }
-
-  /**
-   * Additional delegation policy in coordinator mode.
-   * Goal: force the main agent to orchestrate specialized parallel workers,
-   * not funnel work into one generic sub-agent.
-   */
-  private getCoordinatorDelegationViolation(
-    toolName: string,
-    input: Record<string, unknown>,
-  ): string | null {
-    if (toolName === 'Agent') {
-      const agentType = String(input.subagent_type ?? 'general-purpose')
-      const serialReason = String(input.serial_reason ?? '').trim()
-
-      if (FORBIDDEN_COORDINATOR_AGENT_TYPES.has(agentType)) {
-        return `主agent禁止委派 ${agentType} 这类泛化子agent。请使用专用红队子agent（如 recon / vuln-scan / manual-exploit / lateral / flag-hunter）。`
-      }
-
-      if (PARALLEL_FIRST_AGENT_TYPES.has(agentType) && serialReason.length < 8) {
-        return `阶段型任务 ${agentType} 默认必须并行编排。请改为 MultiAgent 一次启动多个子agent；若确有强依赖需串行，请在 Agent 调用中提供 serial_reason 说明依赖原因。`
-      }
-    }
-
-    if (toolName === 'MultiAgent') {
-      const specs = input.agents
-      if (!Array.isArray(specs) || specs.length === 0) return null
-
-      for (const raw of specs) {
-        if (!raw || typeof raw !== 'object') continue
-        const spec = raw as Record<string, unknown>
-        const agentType = String(spec.subagent_type ?? 'general-purpose')
-        if (FORBIDDEN_COORDINATOR_AGENT_TYPES.has(agentType)) {
-          return `MultiAgent 中禁止包含 ${agentType}。请改为专用红队子agent类型。`
-        }
-      }
-    }
-
-    return null
-  }
-
-  /**
-   * Check whether a Bash command is allowed in coordinator mode.
-   * Uses whitelist (allowed patterns) + blacklist (blocked patterns).
-   */
-  private checkCoordinatorBash(cmd: string): { allowed: boolean; reason: string } {
-    const trimmed = cmd.trim()
-    if (!trimmed) return { allowed: false, reason: '空命令' }
-
-    // First check blacklist — if any blacklisted pattern matches, block
-    for (const re of COORDINATOR_BASH_BLACKLIST) {
-      if (re.test(trimmed.toLowerCase())) {
-        return { allowed: false, reason: `该命令匹配黑名单：${re.source}，属于扫描/利用/安装类操作，应委派子 agent` }
-      }
-    }
-
-    // Then check whitelist — if any whitelisted pattern matches, allow
-    for (const re of COORDINATOR_BASH_WHITELIST) {
-      if (re.test(trimmed.toLowerCase())) {
-        return { allowed: true, reason: '' }
-      }
-    }
-
-    return { allowed: false, reason: '该命令不在协调者只读命令白名单中' }
   }
 }

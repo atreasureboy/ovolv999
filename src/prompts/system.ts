@@ -14,7 +14,6 @@ import type { OvogoMdFile } from '../config/ovogomd.js'
 import { formatOvogoMdForPrompt } from '../config/ovogomd.js'
 import type { EngagementScope } from '../config/settings.js'
 import { getAttackKnowledgeSection } from './attackKnowledge.js'
-import type { KnowledgeEntry } from '../core/knowledgeBase.js'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 

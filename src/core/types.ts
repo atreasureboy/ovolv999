@@ -1,4 +1,4 @@
-// Core types for ovogogogo execution engine
+// Core types for ovolv999 execution engine
 
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -87,7 +87,7 @@ export interface ToolContext {
   apiConfig?: { apiKey: string; baseURL?: string; model: string }
   /**
    * Session output directory — for tools that need to write to the engagement
-   * session directory (e.g. FindingWrite for anchor updates).
+   * session directory (e.g. compiled binaries, source code, logs).
    */
   sessionDir?: string
   /** Event log for audit trail — best-effort, never throws */
@@ -96,8 +96,6 @@ export interface ToolContext {
   semanticMemory?: import('./semanticMemory.js').SemanticMemory
   /** Episodic memory — action trajectory persistence */
   episodicMemory?: import('./episodicMemory.js').EpisodicMemory
-  /** Knowledge base — growing attack knowledge */
-  knowledgeBase?: import('./knowledgeBase.js').KnowledgeBase
 }
 
 /**
@@ -129,42 +127,22 @@ export interface EngineConfig {
   hookRunner?: IHookRunner
   /** Session output directory — injected into sub-agent prompts */
   sessionDir?: string
-  /** Primary engagement target (usually the first configured target) */
+  /** Primary target identifier (URL/IP) */
   primaryTarget?: string
-  /** All in-scope targets from engagement config */
-  engagementTargets?: string[]
-  /** Out-of-scope targets from engagement config */
-  outOfScopeTargets?: string[]
-  /** Current engagement phase */
-  engagementPhase?: string
-  /** Progress tracker for long-running tools */
-  progressTracker?: import('./progressTracker.js').ProgressTracker
-  /** Cache for tool execution results */
-  toolCache?: import('./toolCache.js').ToolCache
-  /**
-   * Coordinator mode: main agent acts as orchestrator only.
-   * Scanning/exploitation tools are blocked — must delegate to sub-agents.
-   * Only applies to the main agent (sessionDir is set), not sub-agents.
-   */
-  coordinatorMode?: boolean
   /**
    * Maximum context window in tokens for the selected model.
    * Defaults to 200_000 (claude-sonnet-4-x).  Used to compute percentage-based
    * compact/warn thresholds instead of a flat token count.
    */
   maxContextTokens?: number
-  /** Dispatch manager for async agent communication */
-  dispatchManager?: import('./dispatch.js').DispatchManager
-  /** Event log for audit trail */
-  eventLog?: import('./eventLog.js').EventLog
   /** Context budget manager for explicit token allocation */
   contextBudget?: import('./contextBudget.js').ContextBudgetManager
+  /** Event log for audit trail */
+  eventLog?: import('./eventLog.js').EventLog
   /** Semantic memory — cross-turn knowledge persistence */
   semanticMemory?: import('./semanticMemory.js').SemanticMemory
   /** Episodic memory — action trajectory persistence */
   episodicMemory?: import('./episodicMemory.js').EpisodicMemory
-  /** Knowledge base — growing attack knowledge */
-  knowledgeBase?: import('./knowledgeBase.js').KnowledgeBase
 }
 
 export interface TurnResult {
