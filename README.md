@@ -1,700 +1,474 @@
-# Ovogo — 自主红队协调引擎
+# ovolv999 — APT 思维注入的攻防代理引擎
 
 <div align="center">
 
-**AI 驱动的渗透测试自主协调 Agent | Think-Act-Observe 引擎 | 多 Agent 编排 | 防护感知利用 | 跨轮次记忆**
+**Playbook 驱动 · 单链路串行 · 防护感知 · 全阶段渗透测试自动化**
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
-[![OpenAI](https://img.shields.io/badge/OpenAI-Compatible-green.svg)](https://platform.openai.com/)
-[![Claude](https://img.shields.io/badge/Claude-Supported-purple.svg)](https://www.anthropic.com/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/Node-%3E%3D20-339933?logo=node.js)](https://nodejs.org/)
+[![Claude](https://img.shields.io/badge/AI-Claude%20%7C%20OpenAI-191919)](https://claude.ai/)
 
-> 用一句话启动: `ovogo "对 target.com 进行渗透测试"`
+> `npx tsx bin/ovogogogo.ts --mode lv999 --playbook default.json`
 
 </div>
 
----
+## 简介
 
-## 目录
+ovolv999 是一个面向**高防护靶场**的自主攻防代理框架。与传统渗透测试工具的本质区别在于：
 
-- [项目简介](#项目简介)
-- [完整架构全景图](#完整架构全景图)
-- [核心模块详解](#核心模块详解)
-  - [执行引擎：Think-Act-Observe](#执行引擎think-act-observe)
-  - [状态机编排器](#状态机编排器)
-  - [子 Agent 作战体系](#子-agent-作战体系)
-  - [记忆与知识系统](#记忆与知识系统)
-  - [工具系统（22 Tools）](#工具系统22-tools)
-  - [安全基础设施](#安全基础设施)
-  - [环境感知与绕过引擎](#环境感知与绕过引擎)
-- [快速开始](#快速开始)
-- [项目结构](#项目结构)
-- [设计决策](#设计决策)
-- [技术栈](#技术栈)
-- [安全声明](#安全声明)
-
----
-
-## 项目简介
-
-Ovogo 是一个**自主红队协调引擎**——它不是一堆散装的扫描脚本，而是一个具备完整推理能力的 AI Agent，能够：
-
-1. **理解目标** — 接收渗透测试目标（URL / IP / 域名）
-2. **环境感知** — 自动检测 WAF/EDR/沙箱防护，生成结构化绕过建议
-3. **制定计划** — 基于 MITRE ATT&CK 框架自动生成攻击链
-4. **并行分发** — 同时派遣多个专业子 Agent 执行侦察、扫描、利用
-5. **防护感知利用** — 集成 Havoc C2 / Sliver C2 / APT28 三大框架的 23 种绕过技术
-6. **监控进度** — 定时读取子 Agent 输出，评估进展，调整策略
-7. **联动利用** — 将一个 Agent 的发现传递给另一个 Agent 利用
-8. **收集 Flag** — 自动搜索、提取目标 Flag
-9. **生成报告** — 汇总所有发现，形成完整攻击链记录
-
-**与传统红队框架的本质区别：**
-- 传统框架 = 脚本编排（if-then 流程固定，遇防护即失效）
-- Ovogo = AI 自主决策 + 防护感知（LLM 每轮推理，动态检测防护并选择绕过技术）
-
----
+- **不是暴力扫描器** — 单 Agent 串行推进，每个阶段独立思考、独立决策
+- **APT 思维注入** — 系统提示词嵌入"如何像黑客一样思考"，而非"要做什么"
+- **Playbook 驱动** — 状态机按阶段推进，阶段间通过 Snapshot 传递上下文
+- **防护感知** — 内置 WAF/EDR/沙箱检测 + 23 种绕过技术（Havoc/Sliver/APT28 提取）
+- **上下文重置** — 每阶段清空历史，避免无关信息干扰当前决策
+- **18 个专用工具** — 从 C2 管理到 Payload 工厂，覆盖全攻击面
 
 ## 完整架构全景图
 
 ```
-╔══════════════════════════════════════════════════════════════════════════════════════════════╗
-║                              Ovogo — 自主红队协调引擎 架构全景                                ║
-╠══════════════════════════════════════════════════════════════════════════════════════════════╣
-║                                                                                              ║
-║   用户输入: "对 zhhovo.top 进行渗透测试"                                                      ║
-║        │                                                                                     ║
-║        ▼                                                                                     ║
-║  ┌─────────────────────────────────────────────────────────────────────────────────────┐    ║
-║  │  bin/ovogogogo.ts  —  主入口 (REPL / 单次任务 / --orchestrator 状态机模式)          │    ║
-║  │  ├── Skill 系统 (阶段动态工具加载)  │  Hook 系统 (Pre/Post 工具钩子)               │    ║
-║  │  ├── MCP 服务 (外部工具扩展)      │  OVOGO.md (用户指令注入)                      │    ║
-║  │  └── Memory 系统 (文件记忆加载)   │  KnowledgeBase (实战知识注入)                  │    ║
-║  └─────────────────────────────────┬───────────────────────────────────────────────────┘    ║
-║                                    │                                                         ║
-║                    ┌───────────────┼───────────────┐                                         ║
-║                    ▼               ▼               ▼                                         ║
-║  ┌─────────────────────┐ ┌────────────────┐ ┌──────────────────────────────┐               ║
-║  │  ExecutionEngine    │ │  Battle        │ │  Agent Worker (独立进程)     │               ║
-║  │  (Think-Act-Observe)│ │  Orchestrator  │ │  ┌──────────────────────┐    │               ║
-║  │                     │ │  (状态机)      │ │  │ 专用 Agent 实例      │    │               ║
-║  │ ┌─────────────────┐ │ │              │ │  │ 独立 Engine + Prompt │    │               ║
-║  │ │ Context Budget  │ │ │ PhaseMachine │ │  │ 文件系统通信         │    │               ║
-║  │ │ + Auto-Compact  │ │ │ 7阶段状态机  │ │  │ 结构化结果提取       │    │               ║
-║  │ ├─────────────────┤ │ ├──────────────┤ │  └──────────────────────┘    │               ║
-║  │ │ Streaming LLM   │ │ │ TaskDAG      │ │  │  recon / vuln-scan /      │               ║
-║  │ │ + Tool Stream   │ │ │ 依赖追踪     │ │  │  exploit / privesc /      │               ║
-║  │ ├─────────────────┤ │ ├──────────────┤ │  │  lateral / flag-hunter    │               ║
-║  │ │ Critic 审查     │ │ │ LLM          │ │  └──────────────────────────────┘               ║
-║  │ │ (15项自动纠错)  │ │ │ Supervisor   │ │                                                 ║
-║  │ ├─────────────────┤ │ │ RoE约束注入  │ │                                                 ║
-║  │ │ 并行 Tool 调度  │ │ └──────┬───────┘ │                                                 ║
-║  │ │ (Promise.all)   │ │        │       │ │                                                 ║
-║  │ └────────┬────────┘ │        └───────┼─┘                                                 ║
-║  └─────────┼──────────┘                │                                                   ║
-║            │                           │                                                   ║
-║  ┌─────────┴───────────────────────────┼──────────────────────────────────────┐           ║
-║  │            工具层 (22 Tools)         │                                      │           ║
-║  │  ┌──────────┬──────────┬────────────┼──────┬──────────┬──────────────┐     │           ║
-║  │  │ Bash     │ Agent    │ MultiAgent │ 武器 │ Shell    │ TmuxSession  │     │           ║
-║  │  │ 命令执行 │ 子Agent  │ 批量并发   │ 雷达 │ Session  │ 交互进程     │     │           ║
-║  │  ├──────────┼──────────┼────────────┼──────┼──────────┼──────────────┤     │           ║
-║  │  │ Read     │ Write    │ Edit       │ Glob │ Grep     │ TodoWrite    │     │           ║
-║  │  │ 读文件   │ 写文件   │ 精确替换   │ 查找 │ 内容搜索 │ 任务清单     │     │           ║
-║  │  ├──────────┼──────────┼────────────┼──────┼──────────┼──────────────┤     │           ║
-║  │  │ Weapon   │ Web      │ Web        │ C2   │ Dispatch │ Finding      │     │           ║
-║  │  │ Radar    │ Search   │ Fetch      │ 设施 │ Agent    │ Write/List   │     │           ║
-║  │  │ 22W PoC  │ 网络搜索 │ URL获取    │ MSF  │ 异步任务 │ 漏洞管理     │     │           ║
-║  │  ├──────────┼──────────┼────────────┼──────┼──────────┼──────────────┤     │           ║
-║  │  │ MultiScan│ DocRead  │ EnvAnalyzer│技    │          │              │     │           ║
-║  │  │ 并行扫描 │ 文档读取 │ 环境感知   │术生成│          │              │     │           ║
-║  │  └──────────┴──────────┴────────────┴──────┴──────────┴──────────────┘     │           ║
-║  └────────────────────────────────────────────────────────────────────────────┘           ║
-║            │                                                                             ║
-║  ┌─────────┴────────────────────────────────────────────────────────────────────┐       ║
-║  │                        记忆 & 知识 & 安全基础设施                              │       ║
-║  │  ┌──────────────┐ ┌───────────────┐ ┌──────────────┐ ┌──────────────────┐   │       ║
-║  │  │ 语义记忆     │ │ 情景记忆      │ │ 实战知识库   │ │ EventLog         │   │       ║
-║  │  │ SemanticMem  │ │ EpisodicMem   │ │ KnowledgeBase│ │ (不可变事件流)    │   │       ║
-║  │  │ CVE/拓扑/凭证│ │ 行动轨迹      │ │ JSONL持久化  │ │ NDJSON审计轨迹    │   │       ║
-║  │  ├──────────────┤ ├───────────────┤ ├──────────────┤ ├──────────────────┤   │       ║
-║  │  │ 工具缓存     │ │ 进度追踪     │ │ Dispatch     │ │ 文件记忆         │   │       ║
-║  │  │ ToolCache    │ │ Progress     │ │ 异步通信     │ │ MEMORY.md        │   │       ║
-║  │  │ SHA256+TTL   │ │ 长任务管理   │ │ 任务队列     │ │ 跨session偏好    │   │       ║
-║  │  └──────────────┘ └───────────────┘ └──────────────┘ └──────────────────┘   │       ║
-║  └────────────────────────────────────────────────────────────────────────────┘       ║
-║            │                                                                             ║
-║  ┌─────────┴────────────────────────────────────────────────────────────────────────────┐ ║
-║  │                    环境感知 & 绕过引擎 (EnvAnalyzer + TechniqueGenerator)               │ ║
-║  │                                                                                      │ ║
-║  │  ┌─────────────────────────┐    ┌──────────────────────────────────┐                │ ║
-║  │  │  EnvAnalyzer            │ -> │  TechniqueGenerator (23 技术)    │                │ ║
-║  │  │                         │    │                                  │                │ ║
-║  │  │  WAF 检测 (wafw00f/curl)│    │  Havoc 系列 (6 技术):            │                │ ║
-║  │  │  EDR 检测 (进程匹配)    │    │   AMSI/ETW绕过/间接syscall/      │                │ ║
-║  │  │  沙箱检测 (VM特征)      │    │   睡眠混淆/栈伪造/Hash API       │                │ ║
-║  │  │                         │    │                                  │                │ ║
-║  │  │  输出: 防护类型+建议    │    │  Sliver 系列 (7 技术):           │                │ ║
-║  │  │                         │    │   RefreshPE/SGN编码/流量多态/    │                │ ║
-║  │  │                         │    │   PE元数据伪造/.NET双模式/       │                │ ║
-║  │  │                         │    │   Go模板编译/操作模式            │                │ ║
-║  │  │                         │    │                                  │                │ ║
-║  │  │                         │    │  APT28 系列 (8 技术):            │                │ ║
-║  │  │                         │    │   交替XOR/轮转XOR/PNG隐写/       │                │ ║
-║  │  │                         │    │   RW→RX转换/APC注入/COM劫持/     │                │ ║
-║  │  │                         │    │   Dead Drop/WebDAV UNC           │                │ ║
-║  │  └─────────────────────────┘    └──────────────────────────────────┘                │ ║
-║  └────────────────────────────────────────────────────────────────────────────────────┘ ║
-║            │                                                                             ║
-║  ┌─────────┴────────────────────────────────────────────────────────────────────────────┐ ║
-║  │                              子 Agent 作战体系 (25+ 类型)                             │ ║
-║  │                                                                                      │ ║
-║  │   Phase 1: 侦察+探测          Phase 2: 漏洞检索      Phase 3: 漏洞利用+C2            │ ║
-║  │  ┌──────────────────┐      ┌─────────────────┐    ┌────────────────────────────┐    │ ║
-║  │  │ recon ─┬─ dns-recon     │ weapon-match     │    │ manual-exploit (curl/py)   │    │ ║
-║  │  │        ├─ port-scan      │ 22W PoC语义检索  │    │ tool-exploit (MSF/sqlmap)  │    │ ║
-║  │  │        ├─ web-probe      └─────────────────┘    │ c2-deploy (MSF/Sliver)     │    │ ║
-║  │  │        └─ osint                                  └────────────┬───────────────┘    │ ║
-║  │  ├──────────────────┤                                           │                    │ ║
-║  │  │ vuln-scan ─┬─ web-vuln     Phase 4: 靶机操作       Phase 5: 内网横移              │ ║
-║  │  │            ├─ service-vuln ┌──────────────┐    ┌────────────────────────────┐    │ ║
-║  │  │            └─ auth-attack  │ target-recon  │    │ tunnel (chisel socks5)     │    │ ║
-║  │  └──────────────────┘        │ privesc       │    │ internal-recon (proxy+nmap)│    │ ║
-║  │                              └───────┬───────┘    │ lateral (PTH/MS17/Kerberos)│    │ ║
-║  │                                      │            └────────────┬───────────────┘    │ ║
-║  │                              Phase 6: Flag收集       Phase 7: 报告                  │ ║
-║  │                              ┌──────────────┐    ┌────────────────────────────┐    │ ║
-║  │                              │ flag-hunter   │    │ report (渗透测试报告)       │    │ ║
-║  │                              │ 6层深度搜索   │    │ 攻击链记录 + 漏洞清单       │    │ ║
-║  │                              └──────────────┘    └────────────────────────────┘    │ ║
-║  └────────────────────────────────────────────────────────────────────────────────────┘ ║
-║                                                                                          ║
-║  输出: sessions/{target}_{timestamp}/ — 完整攻击记录 + 漏洞清单 + Flag + 报告             ║
-╚══════════════════════════════════════════════════════════════════════════════════════════╝
-```
+===================================================================================
+                          ovolv999 — 完整架构全景图
+===================================================================================
 
----
+  用户输入: "以 Lv999 模式渗透测试 http://target.com"
+       │
+       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  CLI Entry  src/lv999/cli.ts                                             │
+  │  ├── 加载 Playbook (JSON → 阶段定义)                                     │
+  │  ├── 注入 Renderer (终端 UI / Tmux 面板)                                 │
+  │  └── 创建 State Machine 实例                                             │
+  └────────────────────────────┬────────────────────────────────────────────┘
+                               │
+                               ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  State Machine  src/lv999/stateMachine.ts                                │
+  │                                                                          │
+  │  Phase 1 ──Snapshot──▶ Phase 2 ──Snapshot──▶ Phase 3 ──Snapshot──▶ Phase 4│
+  │  (侦察)     (画像)     (武器化)   (方案)      (投递)    (结果)    (后渗透)  │
+  │                                                                          │
+  │  每个阶段: 独立 Engine + 隔离工具集 + 清空历史 + 超时保护                 │
+  └────────────────────────────┬────────────────────────────────────────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                ▼                ▼
+  ┌──────────────────┐ ┌──────────────┐ ┌──────────────────┐
+  │  PromptBuilder   │ │  ToolFilter  │ │  PlaybookParser  │
+  │  • APT Mindset   │ │  白名单过滤  │ │  JSON→PhaseDef   │
+  │  • 威胁模型注入  │ │  并发安全标记│ │  决策树/过渡规则 │
+  │  • 决策树渲染    │ │  NO_CACHE强制│ │  Snapshot配置    │
+  │  • {{snapshot}}  │ │  工具过滤    │ │  maxTurns        │
+  │    上下文替换    │ │              │ │  turnTimeoutMs   │
+  └────────┬─────────┘ └──────┬───────┘ └────────┬─────────┘
+           │                  │                   │
+           └──────────────────┼───────────────────┘
+                              ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  Execution Engine  src/core/engine.ts                                    │
+  │                                                                          │
+  │  ┌───────────────────────────────────────────────────────────────────┐  │
+  │  │  runTurn(message, history)                                        │  │
+  │  │  ├── LLM API 调用 (Claude / OpenAI)                               │  │
+  │  │  ├── 解析 tool_calls 响应                                         │  │
+  │  │  ├── 并发批次执行 (CONCURRENCY_SAFE_TOOLS)                        │  │
+  │  │  └── 结果注入 → 下一轮                                            │  │
+  │  └───────────────────────────────────────────────────────────────────┘  │
+  │                               │                                         │
+  │  ┌────────────────────────────▼────────────────────────────────────┐   │
+  │  │  Tool Dispatcher (18 个工具 · 动态路由)                           │   │
+  │  │                                                                  │   │
+  │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐           │   │
+  │  │  │ Bash     │ │ WebFetch │ │WebSearch │ │Glob/Grep │           │   │
+  │  │  │ 命令执行 │ │ HTTP请求 │ │ 搜索引擎 │ │ 文件检索 │           │   │
+  │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘           │   │
+  │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐           │   │
+  │  │  │FileRead  │ │FileWrite │ │FileEdit  │ │TodoWrite │           │   │
+  │  │  │ 文件读取 │ │ 文件写入 │ │ 文件编辑 │ │ 任务追踪 │           │   │
+  │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘           │   │
+  │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐           │   │
+  │  │  │ Agent    │ │TmuxSession│ │DocRead  │ │ShellSess │           │   │
+  │  │  │ 子代理   │ │ 交互终端  │ │ 文档读取 │ │反弹shell │           │   │
+  │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘           │   │
+  │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐           │   │
+  │  │  │ C2       │ │EnvAnalyze│ │Technique │ │WeaponRadar│          │   │
+  │  │  │Metasploit│ │WAF/EDR/  │ │Gen       │ │PoC语义检索│          │   │
+  │  │  │Sliver    │ │沙箱检测  │ │23种绕过  │ │HTTP API  │          │   │
+  │  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘           │   │
+  │  └──────────────────────────────────────────────────────────────────┘   │
+  └─────────────────────────────────────────────────────────────────────────┘
+       │
+  ┌────▼──────────────────────────────────────────────────────────────────┐
+  │  知识库 & 提示词注入层                                                  │
+  │  ┌─────────────────────────┐  ┌─────────────────────────┐             │
+  │  │ attackKnowledge.ts      │  │ agentPrompts.ts         │             │
+  │  │ • Web/框架/云原生/数据库 │  │ • manual-exploit        │             │
+  │  │ • AD/内网横向移动        │  │ • tool-exploit          │             │
+  │  │ • EDR/AV 绕过 (26模块)   │  │ • privesc / lateral     │             │
+  │  │   Havoc: Indirect Syscall│  │ • target-recon / report │             │
+  │  │   Sliver: RefreshPE/0xC3 │  │ • general-purpose       │             │
+  │  │   APT28: XOR/PNG/APC    │  └─────────────────────────┘             │
+  │  │ • 红旗信号 / 错误处理     │                                          │
+  │  └─────────────────────────┘                                          │
+  └───────────────────────────────────────────────────────────────────────┘
+       │
+  ┌────▼──────────────────────────────────────────────────────────────────┐
+  │  基础设施 & 支撑层                                                      │
+  │  ┌──────────┐ ┌──────────────┐ ┌──────────┐ ┌──────────────┐         │
+  │  │ Renderer │ │ContextBudget │ │EpisodeMem│ │ SemanticMem  │         │
+  │  │ 终端UI   │ │ 上下文截断   │ │ 过程记忆 │ │ 语义记忆     │         │
+  │  └──────────┘ └──────────────┘ └──────────┘ └──────────────┘         │
+  │  ┌──────────┐ ┌──────────────┐ ┌──────────┐ ┌──────────────┐         │
+  │  │ToolCache │ │ EventLog     │ │ProgTrack │ │PriorityQueue │         │
+  │  │ 结果缓存 │ │ 事件日志     │ │ 进度追踪 │ │ 优先级队列   │         │
+  │  └──────────┘ └──────────────┘ └──────────┘ └──────────────┘         │
+  │  ┌──────────┐ ┌──────────────┐ ┌──────────┐ ┌──────────────┐         │
+  │  │ MCP      │ │ MCP Loader   │ │SkillReg  │ │ Settings/Hooks│        │
+  │  │ 客户端   │ │ 动态加载     │ │ 技能注册 │ │ 配置/钩子    │         │
+  │  └──────────┘ └──────────────┘ └──────────┘ └──────────────┘         │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  输出: session/Target_Profile.json → Weaponization_Plan.md → Pentest_Report.md
+===================================================================================
+```
 
 ## 核心模块详解
 
-### 执行引擎：Think-Act-Observe
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                     RunTurn() 主循环                              │
-│                                                                  │
-│  ┌───────────┐    ┌──────────┐    ┌───────────┐    ┌──────────┐ │
-│  │ Context   │ -> │ Streaming │ -> │  Tool     │ -> │ Loop /   │ │
-│  │ Budget +  │    │ LLM Call  │    │  Batch    │    │ Return   │ │
-│  │ Compact   │    │ (Think)   │    │ (Act/Obs) │    │          │ │
-│  └───────────┘    └──────────┘    └───────────┘    └──────────┘ │
-│       ↑                                                         │
-│       │ 每 5 轮                                                  │
-│  ┌────┴──────────┐                                             │
-│  │ Critic 检查    │  15 项自动纠错清单                           │
-│  └───────────────┘                                             │
-│                                                                  │
-│  并行调度: Promise.all (安全工具)  + 串行 (写操作)                │
-│  软中断: ESC 暂停 → 用户介入 → 继续                              │
-│  硬中断: Ctrl+C 取消                                              │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-每次 `runTurn()` 循环：
-1. **上下文预算评估** — 检查 token 使用量，决定是否需要压缩
-2. **自动压缩** — 超过 75% 时调用 LLM 摘要旧消息，保留最近 8 条原始消息
-3. **Critic 注入** — 每 5 轮用 LLM 审查最近 24 条消息，发现失误立即纠正
-4. **流式 API 调用** — 接收 LLM 的文本思考（Think）+ 工具调用（Act）
-5. **工具批调度** — 读工具并行执行（Promise.all），写工具串行执行
-6. **结果注入** — 工具结果作为 user 消息注入下一轮
-
-### 状态机编排器
+### State Machine — 状态机引擎
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    BattleOrchestrator                         │
-│                                                              │
-│  init → recon → vuln-scan → weapon-match → exploit           │
-│         ↘          ↗          ↗         ↗                    │
-│                          post-exploit → privesc → lateral    │
-│                                            ↖        ↗        │
-│                                              report → done   │
-│                                                              │
-│  PhaseMachine: 阶段状态追踪 + 允许转换约束                    │
-│  TaskDAG:      任务依赖图 + 自动触发下游任务                   │
-│  Supervisor:   LLM 决策引擎 (JSON 输出) + RoE 约束注入        │
-│  Fallback:     规则降级决策 (LLM 失败时)                      │
-│                                                              │
-│ 启动: ovogogogo --orchestrator "对 target 进行渗透测试"       │
+│                    Lv999StateMachine                          │
+│                                                               │
+│  run() ──▶ for each phase:                                    │
+│              buildPhaseConfig()                               │
+│                ├── filterToolsForPhase()                      │
+│                └── buildPhaseSystemPrompt()                   │
+│              runPhase() ──▶ while (turn < maxTurns):          │
+│                               runTurnWithTimeout()            │
+│                               checkTransition()               │
+│              snapshotPhase()                                  │
+│              ──▶ next phase (snapshot as userMessage)         │
+│                                                               │
+│  Transition Strategies: stop_sequence | keyword | tool_pattern│
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### 子 Agent 作战体系
+每个阶段获得**独立的执行环境**：
+- 独立 `ExecutionEngine` 实例
+- 隔离的工具集（白名单过滤）
+- 清空的历史记录（避免上下文污染）
+- 每轮超时保护（默认 5 分钟）
+
+阶段间通过 **Snapshot** 传递摘要，而非完整历史，确保 LLM 聚焦当前阶段目标。
+
+### Playbook — 剧本定义
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    子 Agent 作战体系 (25+ 类型)                   │
-│                                                                 │
-│  Phase 1 — 侦察 + 漏洞探测 (并行开局)                            │
-│  ├── recon          侦察总管 (内部: dns-recon / port-scan /     │
-│  │                          web-probe / osint)                  │
-│  └── vuln-scan      漏洞探测总管 (内部: web-vuln /              │
-│                                   service-vuln / auth-attack)   │
-│                                                                 │
-│  Phase 2 — 漏洞检索                                             │
-│  └── weapon-match   POC 库语义检索 (22W Nuclei PoC,             │
-│                      BGE-M3 向量搜索)                            │
-│                                                                 │
-│  Phase 3 — 漏洞利用 + C2 (并行)                                  │
-│  ├── manual-exploit  手工利用 (curl/python 精准打击 + 防护绕过)  │
-│  ├── tool-exploit    工具利用 (MSF/sqlmap/searchsploit)          │
-│  └── c2-deploy       C2 部署 (Metasploit/Sliver 监听 + payload)  │
-│                                                                 │
-│  Phase 4 — 靶机操作                                             │
-│  ├── target-recon   靶机信息收集 (本机 + 内网)                   │
-│  └── privesc        权限提升 (SUID/sudo/内核/计划任务/AMSI绕过)  │
-│                                                                 │
-│  Phase 5 — 内网横移                                             │
-│  ├── tunnel         内网穿透 (chisel socks5 代理)                │
-│  ├── internal-recon 内网资产发现 (proxychains + nmap)            │
-│  └── lateral        横向移动 (MS17-010/PTH/凭证复用/AD攻击)      │
-│                                                                 │
-│  Phase 6 — Flag 收集                                            │
-│  └── flag-hunter    全局 Flag 搜索收集 (6 层深度搜索)             │
-│                                                                 │
-│  Phase 7 — 报告                                                 │
-│  └── report         渗透测试报告生成                              │
-│                                                                 │
-│  每个子 Agent: 独立 Engine | 专用 Prompt | tmux 面板 | 文件通信  │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                     Playbook (JSON)                           │
+│                                                               │
+│  ┌───────────────┐    ┌───────────────┐                      │
+│  │ Phase 1: 侦察  │───▶│ Phase 2: 武器化│                      │
+│  │ maxTurns: 60  │    │ maxTurns: 80  │                      │
+│  │ keyword: json │    │ keyword: md   │                      │
+│  └───────────────┘    └───────────────┘                      │
+│         │                      │                              │
+│         ▼                      ▼                              │
+│  ┌───────────────┐    ┌───────────────┐                      │
+│  │ Phase 3: 投递  │───▶│ Phase 4: 后渗透│                      │
+│  │ maxTurns: 100 │    │ maxTurns: 150 │                      │
+│  │ stop_sequence │    │ keyword: report│                      │
+│  └───────────────┘    └───────────────┘                      │
+│                                                               │
+│  GlobalDecisionTree: 通用操作原则 → 所有阶段继承                 │
+│  PhaseDecisionTree: 阶段内分支策略 → 动态渲染到提示词            │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-### 记忆与知识系统
+当前提供两个 Playbook：
+- **default.json** — 标准 Web 应用 APT 模拟，4 阶段
+- **high-defense.json** — 高防护靶场精英通道，零痕迹侦察 + 精准投递
+
+### Prompt Builder — 提示词组装
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     记忆 & 知识系统                              │
-│                                                                 │
-│  ┌───────────────────┐  ┌───────────────────┐                   │
-│  │   语义记忆        │  │   情景记忆         │                   │
-│  │   SemanticMemory  │  │   EpisodicMemory  │                   │
-│  │                   │  │                   │                   │
-│  │ 渗透知识持久化     │  │ 行动轨迹记录       │                   │
-│  │ CVE利用/内网拓扑   │  │ "做了什么/成功失败" │                   │
-│  │ 凭证/技术栈        │  │ Critic检查时注入   │                   │
-│  │                   │  │                   │                   │
-│  │ 存储: semantic.jsonl│ │ 存储: episodes.jsonl│                  │
-│  └───────────────────┘  └───────────────────┘                   │
-│                                                                 │
-│  ┌───────────────────┐  ┌───────────────────┐                   │
-│  │   实战知识库       │  │   文件记忆         │                   │
-│  │   KnowledgeBase   │  │   MEMORY.md       │                   │
-│  │                   │  │                   │                   │
-│  │ 4类 JSONL 持久化   │  │ 用户协作偏好       │                   │
-│  │ attack_patterns   │  │ 项目约定/反馈      │                   │
-│  │ cve_notes         │  │ 跨 session 保留    │                   │
-│  │ tool_combos       │  │                   │                   │
-│  │ target_profiles   │  │ 存储: memory/     │                   │
-│  │                   │  │                   │                   │
-│  │ 规则提取(零LLM成本) │  │ 启动时自动加载     │                   │
-│  │ 实时+Session结束   │  │                   │                   │
-│  └───────────────────┘  └───────────────────┘                   │
-│                                                                 │
-│  攻击知识库 (AttackKnowledge) — 19 章节系统性方法论              │
-│  ├── Web攻击向量 (API/认证/上传/SSRF/SSTI/反序列化)              │
-│  ├── 框架漏洞 (Java/PHP/Python/Node.js/Go)                      │
-│  ├── 云原生攻击 (Docker/K8s/CI-CD/AWS/Azure/GCP)                │
-│  ├── 数据库攻击 (Redis/MongoDB/MySQL/PG/ES/RabbitMQ/Kafka)      │
-│  ├── 内网&AD攻击 (Kerberos/NTLM/ADCS/BloodHound/横向)           │
-│  ├── OAuth/SAML/SSO (授权码劫持/PKCE/断言注入)                  │
-│  ├── AI/LLM应用攻击 (Prompt注入/RAG污染/工具滥用)                │
-│  ├── 供应链&CI/CD (依赖污染/GitHub Actions/Jenkins)             │
-│  ├── 攻击链配方 (10条完整攻击链公式)                             │
-│  ├── EDR/AV 绕过技术 (AMSI/ETW/WAF/进程注入速查)                │
-│  └── Sliver C2 技术 (RefreshPE/SGN/流量多态/PE伪造)             │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                  buildPhaseSystemPrompt()                     │
+│                                                               │
+│  1. APT Mindset ── "如何像黑客一样思考"                         │
+│  2. Threat Mindset ── 根据检测到的防护类型注入对应策略           │
+│  3. Phase Template ── 阶段专属指令 + {{phase_snapshot}} 替换  │
+│  4. Phase DecisionTree ── 阶段内分支策略                       │
+│  5. Global DecisionTree ── 全局操作原则                        │
+│  6. One-Step-Think-Act ── 一步一动作规则                       │
+│                                                               │
+│  最终输出: 完整的系统提示词，注入给 LLM                         │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-### 工具系统（22 Tools）
-
-所有工具统一 `Tool` 接口：`execute(input, context) → Promise<ToolResult>`
-
-| 类别 | 工具 | 职责 |
-|------|------|------|
-| **执行** | Bash | Shell 命令（进程组 kill、后台模式、follow 模式） |
-| | ShellSession | 持久反弹 Shell（listen/exec/kill） |
-| | TmuxSession | 本地交互进程（msfconsole/sqlmap/REPL） |
-| **文件** | Read / Write / Edit / Glob / Grep | 文件读写、查找、替换 |
-| **情报** | WeaponRadar | 22W PoC 向量数据库语义检索（BGE-M3） |
-| | WebSearch / WebFetch / DocRead | 网络搜索、URL 获取、文档读取 |
-| **编排** | Agent / MultiAgent | 启动单个或多个子 Agent |
-| | DispatchAgent / CheckDispatch / GetDispatchResult | 异步任务分发 |
-| **管理** | FindingWrite / FindingList | 漏洞记录管理 |
-| | TodoWrite | 任务清单 |
-| | C2 | C2 基础设施（Metasploit/Sliver） |
-| **扫描** | MultiScan | 并行扫描执行（等待/后台双模式） |
-| **感知** | EnvAnalyzer | WAF/EDR/沙箱环境检测 + 绕过建议 |
-| **绕过** | TechniqueGenerator | 23 种绕过技术生成（Havoc/Sliver/APT28） |
-
-**调度策略**：
-- **并行批**（Promise.all）：Read/Glob/Grep/WebFetch/WebSearch/Bash/Agent/MultiAgent/DispatchAgent/C2/ShellSession/TmuxSession/MultiScan/EnvAnalyzer/TechniqueGenerator
-- **串行批**（竞态安全）：Write/Edit/FindingWrite
-
-### 环境感知与绕过引擎
-
-这是 Ovogo 区别于传统 AI 渗透工具的核心能力 —— 不再盲目生成 payload，而是先检测防护、再生成绕过方案。
+### Tool Dispatcher — 工具分发器
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                  环境感知 & 绕过引擎                              │
-│                                                                 │
-│  Step 1: EnvAnalyzer 环境检测                                    │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                                                          │   │
-│  │  WAF 检测 ──> wafw00f → 10种WAF特征匹配 → 置信度评分     │   │
-│  │    ├── Cloudflare / 宝塔 / ModSecurity / AWS WAF         │   │
-│  │    ├── Akamai / Imperva / Sucuri / 360 / 安全狗 / 长亭   │   │
-│  │    └── 降级: curl 手动探针 + 状态码对比                   │   │
-│  │                                                          │   │
-│  │  EDR 检测 ──> ShellSession → tasklist 匹配已知EDR进程    │   │
-│  │    ├── Windows Defender / CrowdStrike / SentinelOne      │   │
-│  │    ├── Symantec / Carbon Black / FireEye / McAfee        │   │
-│  │    └── Trend Micro / Kaspersky                            │   │
-│  │                                                          │   │
-│  │  沙箱检测 ──> CPU/内存/MAC/主机名 VM特征匹配              │   │
-│  │                                                          │   │
-│  │  输出: 防护类型 + 针对性绕过建议 → TechniqueGenerator     │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│  Step 2: TechniqueGenerator 绕过生成 (23 技术)                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                                                          │   │
-│  │  Havoc 系列 (6 技术):                                    │   │
-│  │  ├── AMSI bypass  ──> 反射补丁/字符串混淆/环境变量/NGEN │   │
-│  │  ├── ETW bypass   ──> 反射补丁/注册表禁用                │   │
-│  │  ├── Havoc strategy ──> 编译器标志/间接syscall/         │   │
-│  │  │                    硬件断点/睡眠混淆/栈伪造/Hash API  │   │
-│  │  └── shellcode_encode / waf_evasion / obfuscated_ps      │   │
-│  │                                                          │   │
-│  │  Sliver 系列 (7 技术):                                   │   │
-│  │  ├── RefreshPE      ──> DLL .text从磁盘重载去hook        │   │
-│  │  ├── SGN encoding   ──> Shikata-Ga-Nai多态编码           │   │
-│  │  ├── Traffic encoder──> 8种HTTP流量多态(Base32/58/64/   │   │
-│  │  │                       Hex/English/PNG/Gzip/WASM)      │   │
-│  │  ├── PE donor       ──> Rich Header/时间戳/签名克隆      │   │
-│  │  ├── .NET dual      ──> 进程内CLR托管 vs fork-and-run    │   │
-│  │  ├── Go template    ──> 条件编译/garble混淆              │   │
-│  │  └── Sliver strategy ──> 操作模式综合                     │   │
-│  │                                                          │   │
-│  │  APT28 系列 (8 技术):                                    │   │
-│  │  ├── String obfusc  ──> 交替字节XOR + Null填充           │   │
-│  │  ├── Rotating XOR   ──> 76字节轮转XOR密钥                │   │
-│  │  ├── PNG stego      ──> PNG隐写术 LSB提取shellcode       │   │
-│  │  ├── RW→RX transition ──> 避免RWX检测的两阶段内存         │   │
-│  │  ├── APC injection  ──> QueueUserAPC > CreateRemoteThread│   │
-│  │  ├── COM hijack     ──> InprocServer32注册表劫持          │   │
-│  │  ├── Dead Drop      ──> 合法云API作为C2(filen.io)        │   │
-│  │  └── WebDAV UNC     ──> 无落地DLL内存加载                 │   │
-│  │                                                          │   │
-│  │  工作流: EnvAnalyzer → 检测防护 → TechniqueGenerator      │   │
-│  │           → 选择绕过技术 → 生成payload → curl/Shell/C2投递│   │
-│  └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                     Tool Dispatcher                           │
+│                                                               │
+│  LLM 请求 ──▶ 解析 tool_calls ──▶ 分发到对应工具               │
+│                                                               │
+│  ┌───────────────────────────────────────────────────────┐   │
+│  │  文件操作: Read | Write | Edit | Glob | Grep          │   │
+│  │  网络操作: Bash | WebFetch | WebSearch                │   │
+│  │  会话管理: ShellSession | TmuxSession | C2            │   │
+│  │  攻防专用: EnvAnalyzer | TechniqueGenerator           │   │
+│  │             | WeaponRadar | Agent                     │   │
+│  │  基础设施: TodoWrite | DocRead                        │   │
+│  └───────────────────────────────────────────────────────┘   │
+│                                                               │
+│  调度策略:                                                    │
+│  • CONCURRENCY_SAFE_TOOLS → 无副作用工具可并行执行             │
+│  • NO_CACHE_TOOLS → 状态敏感工具强制刷新（EnvAnalyzer等）       │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**绕过工作流示例**：
+### Execution Engine — 执行引擎
 
 ```
-目标: http://192.168.1.100
-
-1. EnvAnalyzer({ target: "http://192.168.1.100", analyze_mode: "all" })
-   → WAF: 宝塔 (confidence: 0.95)
-   → EDR: Windows Defender (通过ShellSession检测)
-   → 建议: 使用分块传输编码绕过WAF; 先执行AMSI bypass再运行PowerShell
-
-2. TechniqueGenerator({ technique: "waf_evasion", payload: "' OR 1=1--",
-    analysis_context: { waf: "宝塔" } })
-   → 返回: Unicode编码 + SQL注释插入 + 分块传输 + 参数污染 四种方案
-
-3. TechniqueGenerator({ technique: "amsi_bypass", payload: "payload",
-    analysis_context: { edr: "Windows Defender" } })
-   → 返回: 反射补丁 + 字符串混淆 + 排除路径 三种方案
-
-4. 组合绕过payload → 通过curl/ShellSession/C2投递
+┌──────────────────────────────────────────────────────────────┐
+│                    ExecutionEngine                            │
+│                                                               │
+│  runTurn(message, history)                                    │
+│    │                                                          │
+│    ├─▶ LLM API 调用 (Claude / OpenAI)                        │
+│    │                                                          │
+│    ├─▶ 解析响应:                                              │
+│    │    ├── 纯文本 → 注入历史 → 返回                          │
+│    │    └── tool_calls → 分发执行 → 结果注入 → 继续           │
+│    │                                                          │
+│    └─▶ 并发优化:                                             │
+│         ├── 安全工具批次 → 并行执行                           │
+│         └── 状态工具 → 串行执行                               │
+│                                                               │
+│  超时包装: runTurnWithTimeout()                               │
+│  • 默认 5 分钟/轮                                             │
+│  • 超时后中止当前 turn，返回错误状态                           │
+│  • State Machine 根据错误状态决定是否继续                      │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-### 安全基础设施
+### Attack Knowledge — 攻击知识库
+
+注入到 LLM 系统提示词的结构化攻击方法论，包含：
+
+| 模块 | 内容 |
+|------|------|
+| Web 攻击 | SQLi/XSS/SSRF/文件上传/命令注入 |
+| 框架漏洞 | Spring/Struts2/ThinkPHP/Fastjson/Shiro |
+| 云原生 | Docker逃逸/K8s配置错误/容器权限提升 |
+| 数据库 | MySQL/MSSQL/Redis/PostgreSQL 提权 |
+| AD/内网 | Kerberoasting/PTH/PTT/DCSync |
+| **EDR/AV 绕过** | Havoc 26 模块 + Sliver C2 + APT28 战术 |
+| 红旗信号 | 被发现的征兆 + 应急响应对应关系 |
+
+### EnvAnalyzer — 环境检测工具
 
 ```
-ShellSession (反弹 Shell 持久管理)          TmuxSession (本地交互进程)
-┌─────────────────────────┐                ┌──────────────────────────┐
-│  目标 ──TCP──> 攻击机    │                │  msfconsole / sqlmap     │
-│     │                   │                │       │                  │
-│  listen(port)           │                │  new()  → 创建 tmux 会话  │
-│  exec(session, cmd)     │                │  send() → 发送按键        │
-│  kill(session)          │                │  capture() → 捕获输出     │
-│                         │                │  wait_for() → 等待模式    │
-│  多 Shell 并发           │                │  list() / kill()          │
-│  命令超时控制            │                │ 解决交互式工具超时问题    │
-└─────────────────────────┘                └──────────────────────────┘
-
-C2 集成 (Metasploit + Sliver)
-├── Metasploit: msfrpcd API — listener 部署、payload 生成、session 管理
-├── Sliver: CLI 封装 — implant 生成、beacon 交互
-└── 持久化: C2 状态 JSON，重启后恢复
-
-MultiScan (并行扫描执行器)
-├── 等待模式 (detach: false) — Promise.all 并行，适合 <5min 短任务
-│   └── subfinder / httpx / naabu / 快速 nmap → 自动超时 + 结果摘要
-├── 后台模式 (detach: true) — nohup detached 进程，适合长任务
-│   └── nmap -p- / nuclei 全模板 / hydra → 立即返回 PID + 输出路径
-└── 统一输出: 状态图标 + 耗时 + 输出文件大小 + 末尾预览
+┌──────────────────────────────────────────────────────────────┐
+│                    EnvAnalyzerTool                            │
+│                                                               │
+│  输入: { target, detect_mode: 'waf'|'edr'|'sandbox'|'all' }  │
+│                                                               │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
+│  │ WAF 检测    │  │ EDR 检测    │  │ 沙箱检测    │          │
+│  │ wafw00f →   │  │ tasklist →  │  │ CPU ≤ 2     │          │
+│  │ curl 探针 → │  │ 进程名匹配  │  │ RAM < 2GB   │          │
+│  │ 10种WAF特征 │  │ 9种EDR进程  │  │ VM MAC前缀  │          │
+│  └─────────────┘  └─────────────┘  └─────────────┘          │
+│                                                               │
+│  输出: "WAF: 宝塔 | EDR: Windows Defender | 沙箱: false"      │
+│        "建议: 1) 分块传输绕过WAF 2) AMSI bypass后再执行PS"    │
+└──────────────────────────────────────────────────────────────┘
 ```
 
----
+### TechniqueGenerator — 绕过技术生成器
+
+覆盖 23 种逃逸技术，从三大来源提取：
+
+| 来源 | 技术 |
+|------|------|
+| **Havoc C2** | Indirect Syscall, Hardware BP AMSI, Sleep Obf, Stack Spoofing, Hash API |
+| **Sliver C2** | RefreshPE, 0xC3 AMSI/ETW Patch, SGN Polymorphic, Traffic Encoder, PE Donor |
+| **APT28** | Alternating Byte XOR, Rotating XOR, PNG Stego, RW→RX, APC Inject, COM Hijack, Dead Drop, WebDAV UNC |
 
 ## 快速开始
 
-### 一键安装
-
-**Windows:**
-```cmd
-setup.bat
-```
-
-**macOS / Linux:**
-```bash
-chmod +x setup.sh && ./setup.sh
-```
-
-### 手动安装
+### 安装
 
 ```bash
-git clone https://github.com/atreasureboy/ovogo.git
-cd ovogo
+git clone https://github.com/atreasureboy/ovolv999.git
+cd ovolv999
 npm install
-npm run build
 ```
 
 ### 配置
 
-```bash
-# 设置 API 密钥 (必需)
-export OPENAI_API_KEY=sk-xxx          # Linux/macOS
-set OPENAI_API_KEY=sk-xxx             # Windows CMD
-$env:OPENAI_API_KEY="sk-xxx"          # Windows PowerShell
+设置环境变量：
 
-# 可选配置
-export OPENAI_BASE_URL=https://api.example.com  # 兼容端点
-export OVOGO_MODEL=gpt-4o                       # 模型
-export OVOGO_MAX_ITER=200                       # 最大轮数
-export OVOGO_CWD=/path/to/project                # 工作目录
+```bash
+# Claude API
+export ANTHROPIC_API_KEY="your-key"
+
+# 或 OpenAI 兼容 API
+export OPENAI_API_KEY="your-key"
+export OPENAI_BASE_URL="https://your-proxy.com/v1"
+export OPENAI_MODEL="claude-sonnet-4-6-20250514"
+
+# 可选：Weapon Radar API
+export WEAPON_RADAR_URL="http://127.0.0.1:8765"
 ```
 
 ### 使用
 
 ```bash
-# 交互模式 (REPL)
-ovogo
+# 标准模式 — 默认 Playbook
+npx tsx bin/ovogogogo.ts --mode lv999 --playbook default.json
 
-# 直接任务
-ovogo "对 zhhovo.top 进行渗透测试"
+# 高防护靶场模式
+npx tsx bin/ovogogogo.ts --mode lv999 --playbook high-defense.json
 
-# 管道输入
-echo "分析当前项目安全" | ovogo
-
-# Plan 模式 (只读分析)
-ovogo "/plan 分析目标 zhhovo.top 的攻击面"
-
-# 状态机编排模式 (全自动攻击链)
-ovogo --orchestrator "对 zhhovo.top 进行渗透测试"
-
-# 参数控制
-ovogo -m claude-sonnet-4-x --max-iter 300 --cwd /target/dir
+# 指定工作目录
+npx tsx bin/ovogogogo.ts --mode lv999 --playbook default.json --cwd ./session-01
 ```
-
-### REPL 命令
-
-| 命令 | 功能 |
-|------|------|
-| `/plan <task>` | Plan 模式运行（只读分析 + 确认执行） |
-| `/skills` | 列出可用 skills |
-| `/clear` | 清空对话历史 |
-| `/history` | 显示消息数 |
-| `/model` | 显示当前模型 |
-| `/help` | 显示帮助 |
-| `/exit` | 退出 |
-
-交互控制：
-- **ESC** — 暂停当前操作，注入用户建议
-- **Ctrl+C** — 强制取消
-- **Ctrl+D** — 退出
-
----
 
 ## 项目结构
 
 ```
-ovogo/
+ovolv999/
 ├── bin/
-│   ├── ovogogogo.ts          # 主入口 (REPL + Task + Plan + Orchestrator)
-│   └── agent-worker.ts       # 子 Agent 独立进程
-│
+│   └── ovogogogo.ts          # 主入口 — CLI 参数解析 + 模式路由
+├── playbooks/
+│   ├── default.json          # 标准 APT 模拟 Playbook (4 阶段)
+│   └── high-defense.json     # 高防护靶场 Playbook (4 阶段)
 ├── src/
-│   ├── core/                 # 核心引擎
-│   │   ├── engine.ts         # Think-Act-Observe 执行引擎 (流式 + 并行调度 + Critic)
-│   │   ├── orchestrator.ts   # 状态机 + TaskDAG + LLM Supervisor
-│   │   ├── types.ts          # 核心类型定义
-│   │   ├── compact.ts        # 上下文压缩 (LLM 摘要 + 百分比阈值)
-│   │   ├── contextBudget.ts  # 上下文预算管理 (显式 token 分配)
-│   │   ├── eventLog.ts       # 不可变事件流 (NDJSON 审计轨迹)
-│   │   ├── dispatch.ts       # 异步 Agent 分发管理器
-│   │   ├── semanticMemory.ts # 语义记忆 (跨 session 渗透知识)
-│   │   ├── episodicMemory.ts # 情景记忆 (行动轨迹记录)
-│   │   ├── knowledgeBase.ts  # 实战知识库 (JSONL 持久化)
-│   │   ├── knowledgeExtractor.ts # 规则知识提取器 (零LLM成本)
-│   │   ├── skillRegistry.ts  # 技能注册表 (阶段动态加载)
-│   │   ├── progressTracker.ts# 长任务进度追踪
-│   │   ├── toolCache.ts      # 工具结果缓存 (SHA256 + TTL)
-│   │   └── priorityQueue.ts  # 优先级队列
-│   │
-│   ├── tools/                # 通用工具 (22 tools)
-│   │   ├── agent.ts          # 子 Agent 派发 + Dispatch 工具
-│   │   ├── multiAgent.ts     # 批量并发子 Agent
-│   │   ├── bash.ts           # Shell 命令执行 (进程组 kill)
-│   │   ├── shellSession.ts   # 反弹 Shell 持久管理
-│   │   ├── tmuxSession.ts    # 本地交互进程管理
-│   │   ├── weaponRadar.ts    # 22W PoC 向量数据库检索
-│   │   ├── multiScan.ts      # 并行扫描执行器 (等待/后台双模式)
-│   │   ├── c2.ts             # C2 基础设施 (MSF/Sliver)
-│   │   ├── finding.ts        # 漏洞档案管理
-│   │   ├── envAnalyzer.ts    # 环境感知 (WAF/EDR/沙箱检测)
-│   │   ├── techniqueGenerator.ts # 绕过引擎 (23种技术: Havoc/Sliver/APT28)
+│   ├── config/
+│   │   ├── hooks.ts          # 钩子系统 — 工具执行前后钩子
+│   │   ├── settings.ts       # 配置解析 — 环境变量/JSON 配置
+│   │   └── ovogomd.ts        # Markdown 配置加载器
+│   ├── core/
+│   │   ├── engine.ts         # 核心执行引擎 — LLM 调用 + 工具分发
+│   │   ├── types.ts          # 类型定义 — Tool/TurnResult/EngineConfig
+│   │   ├── agentTypes.ts     # Agent 类型定义
+│   │   ├── contextBudget.ts  # 上下文截断管理
+│   │   ├── episodicMemory.ts # 过程记忆 — 记录已执行操作
+│   │   ├── semanticMemory.ts # 语义记忆 — 概念/知识存储
+│   │   ├── toolCache.ts      # 工具结果缓存
+│   │   ├── eventLog.ts       # 事件日志
+│   │   ├── progressTracker.ts# 进度追踪
+│   │   ├── priorityQueue.ts  # 优先级队列
+│   │   └── skillRegistry.ts  # 技能注册表
+│   ├── lv999/
+│   │   ├── cli.ts            # Lv999 模式入口
+│   │   ├── stateMachine.ts   # 状态机 — Playbook 驱动阶段推进
+│   │   ├── playbookTypes.ts  # Playbook 类型定义
+│   │   ├── promptBuilder.ts  # 提示词组装 — Mindset + 决策树 + Snapshot
+│   │   ├── mindset.ts        # APT 思维模板
+│   │   ├── toolFilter.ts     # 工具白名单过滤
+│   │   └── cli.ts            # Lv999 CLI 入口
+│   ├── prompts/
+│   │   ├── system.ts         # 基础系统提示词
+│   │   ├── tools.ts          # 工具描述模板
+│   │   ├── attackKnowledge.ts# 攻击方法论知识库
+│   │   └── agentPrompts.ts   # 各角色 Agent 提示词
+│   ├── tools/
+│   │   ├── index.ts          # 工具注册中心
+│   │   ├── bash.ts           # Bash 命令执行
 │   │   ├── fileRead.ts       # 文件读取
 │   │   ├── fileWrite.ts      # 文件写入
 │   │   ├── fileEdit.ts       # 文件编辑
-│   │   ├── glob.ts           # 文件查找
+│   │   ├── glob.ts           # 文件模式匹配
 │   │   ├── grep.ts           # 内容搜索
-│   │   ├── todo.ts           # 任务清单
-│   │   ├── webFetch.ts       # URL 内容获取
-│   │   ├── webSearch.ts      # 网络搜索
+│   │   ├── webFetch.ts       # HTTP 请求
+│   │   ├── webSearch.ts      # 搜索引擎
+│   │   ├── agent.ts          # 子代理委派
+│   │   ├── todo.ts           # 任务追踪
+│   │   ├── tmuxSession.ts    # Tmux 交互式会话
+│   │   ├── shellSession.ts   # 反弹 Shell 管理
 │   │   ├── docRead.ts        # 文档读取
-│   │   └── index.ts          # 工具注册
-│   │
-│   ├── skills/               # 阶段技能模块
-│   │   ├── recon.ts          # 侦察阶段工具
-│   │   ├── vuln-scan.ts      # 漏洞扫描阶段工具
-│   │   ├── exploit.ts        # 漏洞利用阶段工具
-│   │   ├── post-exploit.ts   # 后渗透阶段工具
+│   │   ├── c2.ts             # C2 框架接口 (Metasploit/Sliver)
+│   │   ├── envAnalyzer.ts    # WAF/EDR/沙箱检测
+│   │   ├── techniqueGenerator.ts # 绕过技术生成器 (23 种)
+│   │   └── weaponRadar.ts    # PoC 语义检索 (HTTP API)
+│   ├── services/
+│   │   └── mcp/              # MCP 协议支持
+│   │       ├── client.ts     # MCP 客户端
+│   │       ├── loader.ts     # MCP 服务器加载
+│   │       ├── mcpTool.ts    # MCP 工具适配
+│   │       └── types.ts      # MCP 类型定义
+│   ├── skills/
 │   │   └── loader.ts         # 技能加载器
-│   │
-│   ├── prompts/              # Prompt 工程
-│   │   ├── system.ts         # 系统 Prompt 组装 (12+ sections)
-│   │   ├── agentPrompts.ts   # 25+ Agent 类型专用 Prompt (含防护感知流程)
-│   │   ├── attackKnowledge.ts # 19章攻击知识库 (含EDR绕过/Sliver技术)
-│   │   └── tools.ts          # 工具描述 Prompt
-│   │
-│   ├── config/               # 配置系统
-│   │   ├── settings.ts       # 设置加载 (项目级 + 用户级)
-│   │   ├── hooks.ts          # Hook 执行器
-│   │   └── ovogomd.ts        # OVOGO.md 指令加载
-│   │
-│   ├── memory/               # 文件记忆系统
-│   │   └── index.ts          # MEMORY.md 索引 + 加载
-│   │
-│   ├── ui/                   # 终端 UI
-│   │   ├── renderer.ts       # 终端渲染器 (文件回溯 + spinner)
-│   │   ├── input.ts          # 输入处理 (ESC + Ctrl+C + Ctrl+D)
-│   │   └── tmuxLayout.ts     # tmux 4 面板布局管理
-│   │
-│   └── services/mcp/         # MCP 服务
-│       ├── client.ts         # MCP 客户端
-│       ├── loader.ts         # MCP 服务器加载
-│       ├── mcpTool.ts        # MCP 工具适配
-│       └── types.ts          # MCP 类型
-│
-├── sessions/                 # 运行时 session 输出 (git 忽略)
-├── .ovogo/                   # 项目配置 + skills + findings
-├── setup.bat                 # Windows 一键安装脚本
-├── setup.sh                  # macOS/Linux 一键安装脚本
-├── package.json
-├── tsconfig.json
-└── .gitignore
+│   ├── memory/
+│   │   └── index.ts          # 记忆系统入口
+│   └── ui/
+│       ├── renderer.ts       # 终端 UI 渲染器
+│       ├── input.ts          # 用户输入处理
+│       └── tmuxLayout.ts     # Tmux 面板布局
+└── package.json
 ```
-
----
 
 ## 设计决策
 
-### 为什么是协调器架构？
+### 为什么单 Agent 串行？
 
-渗透测试是**长链路、多工具、长耗时**的任务。单一 Agent 直接执行所有工具会导致：
-1. **上下文窗口爆炸** — 每个工具的结果都占 token
-2. **专注力下降** — Agent 推理能力随上下文增大而衰减
-3. **无法并行** — 串行执行浪费时间
+多 Agent 并行的问题：
+- 工具冲突（多个 Agent 同时操作 ShellSession/C2）
+- 上下文混乱（各自的历史记录无法共享关键发现）
+- 无法形成连贯的攻击链
 
-**协调器方案**：主 Agent 只做决策和读结果，具体执行交给专业子 Agent，每个子 Agent 有隔离的上下文窗口。
+单 Agent 串行通过 State Machine 实现：
+- 每个阶段一个 Agent，专注一个目标
+- 阶段间 Snapshot 传递关键信息
+- 上下文重置避免无关信息干扰
+- 符合真实 APT 攻击的串行特性（侦察 → 武器化 → 投递 → 后渗透）
 
-### 为什么不固化流程？
+### 为什么 Playbook 驱动？
 
-传统红队框架（AutoRecon/Peirates/CrackMapExec）是 if-then 脚本，遇到非标准环境就挂。Ovogo 用 LLM 每轮推理动态决策：
-- 发现新服务 → 立即匹配 POC
-- 扫描超时 → 调整策略
-- 工具缺失 → 安装或换方法
-- **遇到防护 → EnvAnalyzer 检测 → TechniqueGenerator 生成绕过 → 换攻击路径**
+硬编码阶段流程的问题：
+- 无法适配不同场景（标准靶场 vs 高防护）
+- 修改逻辑需要改代码
+- 无法自定义过渡条件
 
-### 为什么引入三大框架技术？
+Playbook 驱动的优势：
+- JSON 定义即可定制完整攻击流程
+- 每个阶段的工具集、超时、过渡规则独立配置
+- 决策树动态渲染到提示词，影响 LLM 决策
 
-单纯靠 LLM "手写"绕过方案，质量不稳定且缺乏实战验证。Ovogo 从三个来源提取技术：
+### 为什么上下文重置？
 
-| 来源 | 提取内容 | 为什么选它 |
-|------|---------|-----------|
-| **Havoc C2** | 间接syscall/硬件断点AMSI bypass/睡眠混淆/栈伪造/Hash API | 编译时+运行时多层绕过，C源码级理解 |
-| **Sliver C2** | RefreshPE/SGN多态编码/流量多态/PE元数据伪造/.NET双模式 | Go工程化能力，模块化扩展系统 |
-| **APT28** | 交替XOR/PNG隐写/RW→RX/APC注入/COM劫持/Dead Drop/WebDAV | 国家级APT实战级免杀，多层加密链 |
+保留完整历史的问题：
+- 侦察阶段的几十个发现会污染武器化阶段的决策
+- LLM 上下文越长，推理质量越低
+- 无法聚焦当前阶段的核心目标
 
-### 状态机编排
-
-主执行路径使用 `src/core/engine.ts` (Think-Act-Observe) + `src/core/orchestrator.ts` (PhaseMachine + TaskDAG + LLM Supervisor)，通过 `--orchestrator` 启用完整攻击链自动化。
-
-### 工具缓存策略
-
-**不缓存**：Bash/ShellSession/TmuxSession/C2/Write/Edit/FindingWrite/Read/Glob/Grep — 这些要么有副作用，要么环境实时变化。
-**缓存**：WebFetch/WebSearch/WeaponRadar — 网络请求和语义检索耗时高，结果相对稳定。
-
----
+Snapshot 方案：
+- 阶段结束时提取摘要（可配置策略）
+- 新阶段只收到摘要，不收到原始对话
+- 摘要质量直接影响下一阶段效果
 
 ## 技术栈
 
-| 类别 | 技术 |
+| 组件 | 技术 |
 |------|------|
-| **语言** | TypeScript 5.7 (ES2022, NodeNext 模块) |
-| **LLM** | OpenAI 兼容 API (Claude / GPT / 任意兼容端点) |
-| **AI 框架** | OpenAI SDK, LangChain Core |
-| **MCP** | @modelcontextprotocol/sdk |
-| **工具集成** | nmap, nuclei, sqlmap, hydra, metasploit, sliver, chisel, subfinder, httpx, katana, ffuf, nikto, wafw00f |
-| **进程管理** | tmux (子 Agent 面板 + 交互进程) |
-| **PoC 数据库** | WeaponRadar (22W Nuclei PoC, BGE-M3 向量搜索, pgvector) |
-| **类型系统** | Zod 3.24 |
-
----
+| 语言 | TypeScript 5.7 (ESM) |
+| 运行时 | Node.js ≥ 20 |
+| LLM API | Claude (Anthropic SDK) / OpenAI SDK |
+| C2 框架 | Metasploit / Sliver (通过 HTTP API) |
+| 攻击知识 | Havoc C2 26 模块 / Sliver C2 / APT28 战术提取 |
+| 协议支持 | MCP (Model Context Protocol) |
+| 终端 UI | 自定义 Renderer + Tmux 面板 |
 
 ## 安全声明
 
-**本项目仅用于授权的安全测试、CTF 竞赛、安全研究和教育目的。**
+本项目仅用于**授权安全测试**和**教育研究**目的。在未经授权的 target 上使用本工具可能违反当地法律。使用者需自行承担法律责任。
 
-使用者必须：
-- 获得目标系统的书面授权
-- 遵守当地法律法规
-- 仅在授权范围内使用
-- 不得用于未授权的渗透测试
+## 许可
 
----
-
-<div align="center">
-
-**Made with ❤️ for the Red Team Community**
-
-[⭐ Star](https://github.com/atreasureboy/ovogo) | [🐛 Issues](https://github.com/atreasureboy/ovogo/issues) | [💡 Feature Request](https://github.com/atreasureboy/ovogo/issues)
-
-</div>
+MIT License
