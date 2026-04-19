@@ -19,6 +19,10 @@ import { C2Tool } from './c2.js'
 import { DocReadTool } from './docRead.js'
 import { EnvAnalyzerTool } from './envAnalyzer.js'
 import { TechniqueGeneratorTool } from './techniqueGenerator.js'
+import { PayloadCompilerTool } from './payloadCompiler.js'
+import { ShellcodeGenTool } from './shellcodeGen.js'
+import { BinaryObfuscatorTool } from './binaryObfuscator.js'
+import { PayloadDeliveryTool } from './payloadDelivery.js'
 
 export function createTools(extraTools: Tool[] = []): Tool[] {
   return [
@@ -38,6 +42,10 @@ export function createTools(extraTools: Tool[] = []): Tool[] {
     new DocReadTool(),
     new EnvAnalyzerTool(),
     new TechniqueGeneratorTool(),
+    new PayloadCompilerTool(),
+    new ShellcodeGenTool(),
+    new BinaryObfuscatorTool(),
+    new PayloadDeliveryTool(),
     ...extraTools,
   ]
 }
@@ -67,4 +75,8 @@ export {
   C2Tool,
   EnvAnalyzerTool,
   TechniqueGeneratorTool,
+  PayloadCompilerTool,
+  ShellcodeGenTool,
+  BinaryObfuscatorTool,
+  PayloadDeliveryTool,
 }

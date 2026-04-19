@@ -154,6 +154,10 @@ const CONCURRENCY_SAFE_TOOLS = new Set([
   'TmuxSession',  // parallel — new / list / capture on different sessions
   'EnvAnalyzer',        // parallel — read-only detection probes
   'TechniqueGenerator', // parallel — text-only technique generation
+  'ShellcodeGen',       // parallel — shellcode encoding
+  'PayloadCompiler',    // parallel — source templating (compilation is serial internally)
+  'BinaryObfuscator',   // serial — mutates binary file on disk
+  'PayloadDelivery',    // parallel — generates delivery commands
 ])
 
 /**
