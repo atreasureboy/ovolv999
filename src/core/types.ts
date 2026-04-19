@@ -1,8 +1,8 @@
-// Core types for ovogogogo execution engine
+// Core types for ovolv999 execution engine
 
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content: string | ContentBlock[]
+  content: string
   tool_call_id?: string
   name?: string
 }
@@ -76,28 +76,9 @@ export interface Tool {
 export interface ToolContext {
   cwd: string
   permissionMode: 'auto' | 'ask' | 'deny'
-  /** AbortSignal — tools should honour this to support Ctrl+C cancellation */
   signal?: AbortSignal
-  /** Progress update function for long-running tools */
-  updateProgress?: (progress: number, recoveryData?: Record<string, unknown>) => void
-  /**
-   * API config forwarded from engine — allows tools that need LLM calls
-   * (e.g. image analysis via vision API) to reuse the same endpoint + key.
-   */
   apiConfig?: { apiKey: string; baseURL?: string; model: string }
-  /**
-   * Session output directory — for tools that need to write to the engagement
-   * session directory (e.g. FindingWrite for anchor updates).
-   */
   sessionDir?: string
-  /** Event log for audit trail — best-effort, never throws */
-  eventLog?: import('./eventLog.js').EventLog
-  /** Semantic memory — cross-turn knowledge persistence */
-  semanticMemory?: import('./semanticMemory.js').SemanticMemory
-  /** Episodic memory — action trajectory persistence */
-  episodicMemory?: import('./episodicMemory.js').EpisodicMemory
-  /** Knowledge base — growing attack knowledge */
-  knowledgeBase?: import('./knowledgeBase.js').KnowledgeBase
 }
 
 /**
@@ -118,63 +99,13 @@ export interface EngineConfig {
   cwd: string
   permissionMode: 'auto' | 'ask' | 'deny'
   systemPrompt?: string
-  /** Extra tools to inject (e.g. MCP tools) */
   extraTools?: Tool[]
-  /**
-   * Plan mode: restrict tools to read-only (Read, Glob, Grep, WebFetch, WebSearch).
-   * The agent analyzes and plans but cannot write, edit, or execute.
-   */
-  planMode?: boolean
-  /** Hook runner for PreToolCall / PostToolCall / UserPromptSubmit events */
   hookRunner?: IHookRunner
-  /** Session output directory — injected into sub-agent prompts */
   sessionDir?: string
-  /** Primary engagement target (usually the first configured target) */
-  primaryTarget?: string
-  /** All in-scope targets from engagement config */
-  engagementTargets?: string[]
-  /** Out-of-scope targets from engagement config */
-  outOfScopeTargets?: string[]
-  /** Current engagement phase */
-  engagementPhase?: string
-  /** Progress tracker for long-running tools */
-  progressTracker?: import('./progressTracker.js').ProgressTracker
-  /** Cache for tool execution results */
-  toolCache?: import('./toolCache.js').ToolCache
-  /**
-   * Coordinator mode: main agent acts as orchestrator only.
-   * Scanning/exploitation tools are blocked — must delegate to sub-agents.
-   * Only applies to the main agent (sessionDir is set), not sub-agents.
-   */
-  coordinatorMode?: boolean
-  /**
-   * Maximum context window in tokens for the selected model.
-   * Defaults to 200_000 (claude-sonnet-4-x).  Used to compute percentage-based
-   * compact/warn thresholds instead of a flat token count.
-   */
-  maxContextTokens?: number
-  /** Dispatch manager for async agent communication */
-  dispatchManager?: import('./dispatch.js').DispatchManager
-  /** Event log for audit trail */
-  eventLog?: import('./eventLog.js').EventLog
-  /** Context budget manager for explicit token allocation */
-  contextBudget?: import('./contextBudget.js').ContextBudgetManager
-  /** Semantic memory — cross-turn knowledge persistence */
-  semanticMemory?: import('./semanticMemory.js').SemanticMemory
-  /** Episodic memory — action trajectory persistence */
-  episodicMemory?: import('./episodicMemory.js').EpisodicMemory
-  /** Knowledge base — growing attack knowledge */
-  knowledgeBase?: import('./knowledgeBase.js').KnowledgeBase
 }
 
 export interface TurnResult {
   stopped: boolean
-  /**
-   * stop_sequence  — LLM returned finish_reason=stop with no tool calls
-   * max_iterations — hit maxIterations ceiling
-   * error          — hard abort (Ctrl+C × 2) or unrecoverable API error
-   * interrupted    — soft pause requested (Ctrl+C × 1), partial history preserved
-   */
   reason: 'max_iterations' | 'stop_sequence' | 'tool_end' | 'error' | 'interrupted'
   output: string
 }

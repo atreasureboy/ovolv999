@@ -1,7 +1,7 @@
 {
   "name": "ovogogogo",
   "version": "0.1.0",
-  "description": "Lightweight OpenAI-compatible autonomous code execution engine",
+  "description": "Lightweight autonomous agent framework — Think-Act-Observe engine with tool use, sub-agent delegation, memory, and MCP support.",
   "type": "module",
   "main": "dist/bin/ovogogogo.js",
   "bin": {
@@ -14,8 +14,6 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "@langchain/core": "^0.3.0",
-    "@langchain/langgraph": "^0.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "glob": "^11.0.0",
     "openai": "^4.77.0",

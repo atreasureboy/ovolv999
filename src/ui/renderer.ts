@@ -234,8 +234,8 @@ export class Renderer {
 
     // Tagline
     this.write(
-      `  ${DIM}AI-Powered Red Team Coordination Engine — ` +
-      `${FG.brightMagenta}autonomous penetration testing${RESET}${DIM}${RESET}\n`,
+      `  ${DIM}Binary Weaponization Engine — ` +
+      `${FG.brightMagenta}think-act-observe engine${RESET}${DIM}${RESET}\n`,
     )
     this.write('\n')
   }
@@ -357,20 +357,11 @@ export class Renderer {
       Edit:              FG.brightBlue,
       Glob:              FG.brightMagenta,
       Grep:              FG.brightMagenta,
-      WebFetch:          FG.cyan,
-      WebSearch:         FG.cyan,
       TodoWrite:         FG.brightGreen,
-      Agent:             FG.brightMagenta,
-      MultiAgent:        FG.brightMagenta,
-      DispatchAgent:     FG.cyan,
-      CheckDispatch:     FG.cyan,
-      GetDispatchResult: FG.cyan,
-      FindingWrite:      FG.brightGreen,
-      FindingList:       FG.brightGreen,
-      WeaponRadar:       FG.brightYellow,
-      C2:                FG.brightRed,
-      ShellSession:      FG.brightRed,
       TmuxSession:       FG.brightRed,
+      ShellSession:      FG.brightRed,
+      C2:                FG.brightRed,
+      TechniqueGenerator: FG.brightYellow,
     }
     return colors[name] ?? FG.white
   }
@@ -383,20 +374,11 @@ export class Renderer {
       Edit:              `${FG.brightBlue}◈${RESET}`,
       Glob:              `${FG.brightMagenta}◇${RESET}`,
       Grep:              `${FG.brightMagenta}◇${RESET}`,
-      WebFetch:          `${FG.cyan}◎${RESET}`,
-      WebSearch:         `${FG.cyan}◎${RESET}`,
       TodoWrite:         `${FG.brightGreen}☐${RESET}`,
-      Agent:             `${FG.brightMagenta}⎇${RESET}`,
-      MultiAgent:        `${FG.brightMagenta}⎈${RESET}`,
-      DispatchAgent:     `${FG.cyan}⇢${RESET}`,
-      CheckDispatch:     `${FG.cyan}⇠${RESET}`,
-      GetDispatchResult: `${FG.cyan}⇤${RESET}`,
-      FindingWrite:      `${FG.brightGreen}⚑${RESET}`,
-      FindingList:       `${FG.brightGreen}⚑${RESET}`,
-      WeaponRadar:       `${FG.brightYellow}⚔${RESET}`,
-      C2:                `${FG.brightRed}⚡${RESET}`,
-      ShellSession:      `${FG.brightRed}⌁${RESET}`,
       TmuxSession:       `${FG.brightRed}⌁${RESET}`,
+      ShellSession:      `${FG.brightRed}⌁${RESET}`,
+      C2:                `${FG.brightRed}⌁${RESET}`,
+      TechniqueGenerator: `${FG.brightYellow}⚒${RESET}`,
     }
     return icons[name] ?? `${FG.white}·${RESET}`
   }
@@ -433,27 +415,9 @@ export class Renderer {
         const glob = input.glob ? ` [${input.glob}]` : ''
         return `/${pattern}/${glob}`
       }
-      case 'Agent': {
-        const type = input.subagent_type ? String(input.subagent_type) : ''
-        const desc = input.description ? String(input.description) : ''
-        return type ? `[${type}] ${desc}` : desc
-      }
-      case 'MultiAgent': {
-        const agents = input.agents
-        if (Array.isArray(agents)) {
-          const types = agents
-            .filter((a: any) => a && typeof a === 'object')
-            .map((a: any) => a.subagent_type ?? 'unknown')
-            .join(', ')
-          return `×${agents.length} agents: ${types}`
-        }
-        return ''
-      }
-      case 'WeaponRadar': {
-        const q = input.query ?? input.queries
-        if (Array.isArray(q)) return `${q.length} queries`
-        if (q) return `"${String(q).slice(0, 50)}"`
-        return ''
+      case 'TechniqueGenerator': {
+        const technique = input.technique ? String(input.technique) : ''
+        return `technique: ${technique}`
       }
       default:
         return JSON.stringify(input).slice(0, 80)
