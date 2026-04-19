@@ -149,15 +149,8 @@ const CONCURRENCY_SAFE_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch',
   'Bash',        // parallel — dependent ops should be chained with && in one call
   'Agent',       // parallel — multiple sub-agents run simultaneously via Promise.all
-  'C2',          // parallel — deploy_listener / get_ip / list_sessions are safe
   'ShellSession', // parallel — listen / list / exec on different sessions
   'TmuxSession',  // parallel — new / list / capture on different sessions
-  'EnvAnalyzer',        // parallel — read-only detection probes
-  'TechniqueGenerator', // parallel — text-only technique generation
-  'ShellcodeGen',       // parallel — shellcode encoding
-  'PayloadCompiler',    // parallel — source templating (compilation is serial internally)
-  'BinaryObfuscator',   // serial — mutates binary file on disk
-  'PayloadDelivery',    // parallel — generates delivery commands
 ])
 
 /**
